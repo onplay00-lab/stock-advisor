@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Advisor - 통합 포트폴리오</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useMemo, useEffect, useCallback } = React;
+
+// ─── 실시간 시세 연동 엔진 ─────────────────────────────────────
+const CORS_PROXY = "https://api.allorigins.win/raw?url=";
+
+async function fetchYahoo(symbol) {
+  try {
+    const url = `${CORS_PROXY}${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1d`)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    const meta = data?.chart?.result?.[0]?.meta;
+    return meta?.regularMarketPrice || null;
+  } catch { return null; }
+}
+
+async function fetchUpbit(market) {
+  try {
+    const res = await fetch(`https://api.upbit.com/v1/ticker?markets=${market}`, { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    return data?.[0]?.trade_price || null;
+  } catch { return null; }
+}
+
+async function fetchExchangeRate() {
+  try {
+    const url = `${CORS_PROXY}${encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X?range=1d&interval=1d")}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const data = await res.json();
+    return data?.chart?.result?.[0]?.meta?.regularMarketPrice || 1509;
+  } catch { return 1509; }
+}
+
+// ─── Brave Search API (뉴스/시장 정보) ──────────────────────
+const BRAVE_API_KEY = "BSAmo8mTUTOddzzXxU18CW3bTP3d0Eo";
+
+async function fetchBraveNews(query) {
+  try {
+    const res = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5&freshness=pd`, {
+      headers: { "Accept": "application/json", "Accept-Encoding": "gzip", "X-Subscription-Token": BRAVE_API_KEY },
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json();
+    return (data?.web?.results || []).slice(0, 5).map(r => ({ title: r.title, url: r.url, desc: r.description, age: r.age }));
+  } catch { return []; }
+}
+
+// ─── 서버 API 연동 ────────────────────────────────────────────
+const API_BASE = "http://localhost:8001";
+
+async function fetchPortfolioFromServer() {
+  try {
+    const res = await fetch(`${API_BASE}/api/portfolio`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error("Server error");
+    return await res.json();
+  } catch { return null; }
+}
+
+// 야후 심볼 매핑
+const YAHOO_MAP = {
+  "000660": "000660.KS", "058470": "058470.KS", "009540": "009540.KS",
+  "ARM": "ARM", "VRT": "VRT",
+  "133690": "133690.KS", "360750": "360750.KS", "379800": "379800.KS", "195930": "195930.KS",
+};
+
+// ─── 환율 (기본값, 실시간 업데이트됨) ────────────────────────────
+let DEFAULT_USD_KRW = 1509;
+const toKRW = (price, market, usdKrw) => (market === "US" ? parseFloat(price) * (usdKrw || DEFAULT_USD_KRW) : parseFloat(price));
+
+// ─── 실제 포트폴리오 데이터 (2026-03-30 기준) ─────────────────
+const MY_CASH = { hantoo: 765982, upbit: 277279 }; // ETH 25만원 추가매수 후
+const ORIGINAL_INVESTMENT = 10000000; // 원금: 한투 300 + 업비트 200 + ISA 500 = 1,000만원
+
+const MY_HOLDINGS = [
+  { name: "SK하이닉스", code: "000660", market: "KRX", sector: "반도체", qty: 1, avg: 919000, price: 869000, per: 2.8, pbr: 2.5, roe: 72.4, rsi: 42, macd: "bearish", note: "HBM4 엔비디아 공급 70% 확보" },
+  { name: "리노공업", code: "058470", market: "KRX", sector: "반도체 부품", qty: 4, avg: 98700, price: 98400, per: 24.9, pbr: 4.7, roe: 20.1, rsi: 51.5, macd: "neutral", note: "AI ASIC 테스트소켓 수혜" },
+  { name: "ARM Holdings", code: "ARM", market: "US", sector: "반도체 설계", qty: 2, avg: 121.78, price: 136.96, per: 81, pbr: 18, roe: 11.3, rsi: 72, macd: "bearish", note: "RSI 과매수, MA 12개 전부 매도시그널" },
+  { name: "Vertiv Holdings", code: "VRT", market: "US", sector: "데이터센터 인프라", qty: 2, avg: 244.88, price: 234.22, per: 78.1, pbr: 15, roe: 41.8, rsi: 62, macd: "bullish", note: "사상최고가 $282 후 조정중, 애널리스트 Strong Buy 컨센서스 목표가 $271" },
+  { name: "이더리움 (ETH)", code: "ETH", market: "CRYPTO", sector: "암호화폐", qty: 0.5935, avg: 2903399, price: 3093000, per: 0, pbr: 0, roe: 0, rsi: 25, macd: "bearish", note: "트리플 과매도, 공포지수 14 — 25만원 분할매수 1차 완료" },
+  { name: "HD한국조선해양", code: "009540", market: "KRX", sector: "조선/해양", qty: 1, avg: 345500, price: 345000, per: 9.1, pbr: 1.2, roe: 12.5, rsi: 55, macd: "bullish", note: "LNG선 수주 호조, 미해군 MRO 진출, PER 9배 저평가" },
+];
+
+// ─── ISA 계좌 (중개형, 2026.02 개설, 의무보유 3년) ─────────────
+const ISA = {
+  account: "44204535-01",
+  type: "중개형",
+  opened: "2026-02",
+  mandatoryYears: 3,
+  annualLimit: 40000000,
+  totalDeposit: 5000000,
+  cash: 428925,
+  taxFreeLimit: 2000000,
+  overTaxRate: 9.9,
+  holdings: [
+    { name: "TIGER 미국나스닥100", code: "133690", qty: 10, avg: 154040, price: 154010, eval: 1540100, pnl: -300, ret: -0.01, sector: "미국 나스닥 성장주" },
+    { name: "TIGER 미국S&P500", code: "360750", qty: 50, avg: 24325, price: 23770, eval: 1188500, pnl: -27750, ret: -2.28, sector: "미국 대형주 인덱스" },
+    { name: "KODEX 미국S&P500", code: "379800", qty: 46, avg: 21725, price: 21725, eval: 999350, pnl: 0, ret: 0, sector: "미국 대형주 인덱스" },
+    { name: "TIGER 유로스톡스50(합성H)", code: "195930", qty: 40, avg: 19905, price: 19905, eval: 796200, pnl: 0, ret: 0, sector: "유럽 선진국" },
+  ],
+};
+
+// ─── 분석 엔진 ───────────────────────────────────────────────
+function fundamentalScore(s) {
+  if (s.market === "CRYPTO") return 50;
+  let sc = 50;
+  if (s.per > 0 && s.per < 10) sc += 15; else if (s.per < 20) sc += 10; else if (s.per < 40) sc += 5; else if (s.per >= 80) sc -= 10;
+  if (s.pbr > 0 && s.pbr < 1) sc += 15; else if (s.pbr < 3) sc += 8; else if (s.pbr >= 6) sc -= 5;
+  if (s.roe > 20) sc += 20; else if (s.roe > 15) sc += 15; else if (s.roe > 10) sc += 10; else if (s.roe > 5) sc += 5; else if (s.roe <= 0) sc -= 10;
+  return Math.max(0, Math.min(100, sc));
+}
+
+function technicalScore(s) {
+  let sc = 50;
+  const rsi = s.rsi || 50;
+  if (rsi < 30) sc += 20; else if (rsi < 40) sc += 10; else if (rsi < 50) sc += 3; else if (rsi > 70) sc -= 15; else if (rsi > 60) sc -= 5;
+  if (s.macd === "bullish") sc += 15; else if (s.macd === "bearish") sc -= 15;
+  return Math.max(0, Math.min(100, sc));
+}
+
+function decide(s, cashTotal, totalAsset) {
+  const fS = fundamentalScore(s);
+  const tS = technicalScore(s);
+  const total = s.market === "CRYPTO" ? tS : fS * 0.35 + tS * 0.45 + 50 * 0.2;
+  const ret = s.avg > 0 ? ((s.price - s.avg) / s.avg * 100) : 0;
+  const valKRW = s.qty * toKRW(s.price, s.market, DEFAULT_USD_KRW);
+  const pct = totalAsset > 0 ? (valKRW / totalAsset * 100) : 0;
+  let action, color, reasons = [];
+
+  if (s.market === "CRYPTO") {
+    if (s.rsi < 30) { action = "분할 매수 기회"; color = "green"; reasons.push("RSI 트리플 과매도", "공포지수 극단"); }
+    else if (s.rsi > 70) { action = "부분 매도"; color = "red"; reasons.push("RSI 과매수"); }
+    else { action = "보유 유지"; color = "gray"; reasons.push("중립 구간"); }
+    if (ret < -20) reasons.push(`손실 ${ret.toFixed(1)}%`);
+  } else if (ret < -20) {
+    action = "손절 매도"; color = "red"; reasons = [`손실 ${ret.toFixed(1)}%`, "손절 기준(-20%) 초과"];
+  } else if (ret > 50) {
+    action = "부분 매도"; color = "red"; reasons = [`수익 +${ret.toFixed(1)}%`, "차익실현 권장"];
+  } else if (total >= 70) {
+    if (pct < 25) { action = "적극 매수"; color = "green"; reasons.push(`종합 ${total.toFixed(0)}점`); }
+    else { action = "보유 (비중↑)"; color = "blue"; reasons.push("비중 충분, 유지"); }
+    if (fS >= 65) reasons.push("재무 우수");
+    if (tS >= 65) reasons.push("기술적 매수");
+  } else if (total >= 55) {
+    action = "보유 유지"; color = "gray"; reasons.push(`종합 ${total.toFixed(0)}점`, "관망");
+  } else if (total >= 40) {
+    action = "보유 (주의)"; color = "yellow"; reasons.push(`종합 ${total.toFixed(0)}점`);
+    if (ret > 15) { action = "부분 매도"; color = "red"; reasons.push(`수익 +${ret.toFixed(1)}%`); }
+  } else {
+    action = "매도 권장"; color = "red"; reasons.push(`종합 ${total.toFixed(0)}점`, "약세");
+  }
+  if (s.note) reasons.push(s.note);
+  return { action, color, fS, tS, total, ret, reasons, valKRW, pct };
+}
+
+// ─── 포맷터 ──────────────────────────────────────────────────
+const fmt = (n) => { const v = Math.round(n); return v >= 1e8 ? (v/1e8).toFixed(1)+"억" : v >= 1e4 ? (v/1e4).toFixed(0)+"만" : v.toLocaleString(); };
+const fmtFull = (n) => Math.round(n).toLocaleString("ko-KR");
+const pnlColor = (v) => v >= 0 ? "text-emerald-600" : "text-red-600";
+const pnlSign = (v) => v >= 0 ? "+" : "";
+
+// ─── 컴포넌트 ────────────────────────────────────────────────
+const Badge = ({ children, c }) => {
+  const m = { green:"bg-emerald-100 text-emerald-800", red:"bg-red-100 text-red-800", yellow:"bg-amber-100 text-amber-800", blue:"bg-blue-100 text-blue-800", purple:"bg-purple-100 text-purple-800", orange:"bg-orange-100 text-orange-800", gray:"bg-gray-100 text-gray-700" };
+  return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${m[c]||m.gray}`}>{children}</span>;
+};
+
+const Bar = ({ label, score }) => {
+  const c = score >= 65 ? "bg-emerald-500" : score >= 45 ? "bg-amber-500" : "bg-red-500";
+  return <div className="flex items-center gap-2 text-xs"><span className="w-12 text-gray-500">{label}</span><div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"><div className={`h-full rounded-full ${c}`} style={{width:`${Math.min(100,score)}%`}}/></div><span className="w-7 text-right font-mono font-bold">{score.toFixed(0)}</span></div>;
+};
+
+const MktBadge = ({ m }) => m === "US" ? <Badge c="purple">🇺🇸 US</Badge> : m === "CRYPTO" ? <Badge c="orange">🪙 Crypto</Badge> : <Badge c="blue">🇰🇷 KRX</Badge>;
+
+// ─── 메인 앱 ─────────────────────────────────────────────────
+function StockAdvisor() {
+  const [tab, setTab] = useState("dashboard");
+  const [holdings, setHoldings] = useState(MY_HOLDINGS);
+  const [isaData, setIsaData] = useState(ISA);
+  const [usdKrw, setUsdKrw] = useState(DEFAULT_USD_KRW);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [fetchStatus, setFetchStatus] = useState("");
+  const [news, setNews] = useState([]);
+  const [serverConnected, setServerConnected] = useState(false);
+
+  const getAnalysisDefaults = (code) => {
+    const defaultItem = MY_HOLDINGS.find(h => h.code === code);
+    return defaultItem ? { per: defaultItem.per, pbr: defaultItem.pbr, roe: defaultItem.roe, rsi: defaultItem.rsi, macd: defaultItem.macd, sector: defaultItem.sector, note: defaultItem.note } : { per: 0, pbr: 0, roe: 0, rsi: 50, macd: "neutral", sector: "기타", note: "" };
+  };
+
+  const refreshPrices = useCallback(async () => {
+    setLoading(true);
+    setFetchStatus("시세 업데이트 중...");
+    let updated = 0, failed = 0;
+    let usedServer = false;
+
+    // 서버에서 포트폴리오 데이터 시도
+    const serverData = await fetchPortfolioFromServer();
+
+    if (serverData && serverData.domestic) {
+      usedServer = true;
+      setServerConnected(true);
+
+      // 환율 업데이트 (서버에서 제공)
+      if (serverData.exchangeRate) {
+        setUsdKrw(serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW);
+        DEFAULT_USD_KRW = serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW;
+      }
+
+      // 국내 주식 매핑 (서버 데이터 + 분석 파라미터)
+      const mappedDomestic = (serverData.domestic.holdings || []).map(h => ({
+        name: h.name,
+        code: h.code,
+        market: "KRX",
+        qty: h.quantity,
+        avg: h.avgPrice,
+        price: h.currentPrice,
+        ...getAnalysisDefaults(h.code),
+      }));
+
+      // ISA 매핑 (서버 데이터 + 분석 파라미터)
+      let mappedIsa = { ...ISA, holdings: [...ISA.holdings] };
+      if (serverData.isa && serverData.isa.holdings && serverData.isa.holdings.length > 0) {
+        mappedIsa.holdings = serverData.isa.holdings.map(h => {
+          const defaultData = ISA.holdings.find(ih => ih.code === h.code);
+          return {
+            name: h.name,
+            code: h.code,
+            qty: h.quantity,
+            avg: h.avgPrice,
+            price: h.currentPrice,
+            eval: h.evalAmount,
+            pnl: h.evalPnl,
+            ret: h.returnPct,
+            sector: defaultData?.sector || "기타",
+          };
+        });
+        if (serverData.isa.summary) {
+          mappedIsa.cash = serverData.isa.summary.availableCash || ISA.cash;
+        }
+      }
+      // ISA 서버 데이터가 비어있으면 기존 하드코딩 데이터 유지
+
+      // 해외 주식 매핑 (서버 데이터 + 분석 파라미터, 거래소별 중복 제거)
+      const overseasRaw = (serverData.overseas && serverData.overseas.holdings || []);
+      const overseasDeduped = [];
+      const seenOverseasCodes = new Set();
+      for (const h of overseasRaw) {
+        if (!seenOverseasCodes.has(h.code)) {
+          seenOverseasCodes.add(h.code);
+          overseasDeduped.push(h);
+        }
+      }
+      const mappedOverseas = overseasDeduped.map(h => ({
+        name: h.name,
+        code: h.code,
+        market: "US",
+        qty: h.quantity,
+        avg: h.avgPrice,
+        price: h.currentPrice,
+        ...getAnalysisDefaults(h.code),
+      }));
+
+      // 암호화폐 매핑 (서버 데이터 + 분석 파라미터)
+      const mappedCrypto = (serverData.crypto && serverData.crypto.holdings || []).map(h => ({
+        name: h.name,
+        code: h.code.replace("KRW-", ""),
+        market: "CRYPTO",
+        qty: h.quantity,
+        avg: h.avgPrice,
+        price: h.currentPrice,
+        ...getAnalysisDefaults(h.code.replace("KRW-", "")),
+      }));
+
+      // 서버에서 못 가져온 종목은 하드코딩 데이터 유지
+      const allServerCodes = new Set([
+        ...mappedDomestic.map(h => h.code),
+        ...mappedOverseas.map(h => h.code),
+        ...mappedCrypto.map(h => h.code),
+      ]);
+      const isaCodeSet = new Set(mappedIsa.holdings.map(h => h.code));
+      const remainingHoldings = MY_HOLDINGS.filter(h => !allServerCodes.has(h.code) && !isaCodeSet.has(h.code));
+
+      setHoldings([...mappedDomestic, ...mappedOverseas, ...mappedCrypto, ...remainingHoldings]);
+      setIsaData(mappedIsa);
+      updated = mappedDomestic.length + mappedOverseas.length + mappedCrypto.length + mappedIsa.holdings.length;
+    } else {
+      // 서버 미연결: 폴백 (Yahoo/Upbit)
+      setServerConnected(false);
+
+      // 환율 업데이트
+      const rate = await fetchExchangeRate();
+      if (rate) { setUsdKrw(rate); DEFAULT_USD_KRW = rate; }
+
+      // 일반 계좌 주식 업데이트
+      const newHoldings = [...MY_HOLDINGS];
+      for (let i = 0; i < newHoldings.length; i++) {
+        const h = newHoldings[i];
+        let newPrice = null;
+        if (h.market === "CRYPTO") {
+          newPrice = await fetchUpbit("KRW-ETH");
+        } else {
+          const sym = YAHOO_MAP[h.code];
+          if (sym) newPrice = await fetchYahoo(sym);
+        }
+        if (newPrice) {
+          newHoldings[i] = { ...h, price: newPrice };
+          updated++;
+        } else { failed++; }
+      }
+      setHoldings(newHoldings);
+
+      // ISA ETF 업데이트
+      const newIsa = { ...ISA, holdings: [...ISA.holdings] };
+      for (let i = 0; i < newIsa.holdings.length; i++) {
+        const h = newIsa.holdings[i];
+        const sym = YAHOO_MAP[h.code];
+        if (sym) {
+          const newPrice = await fetchYahoo(sym);
+          if (newPrice) {
+            const newEval = h.qty * newPrice;
+            const invested = h.qty * h.avg;
+            const pnl = newEval - invested;
+            const ret = invested > 0 ? (pnl / invested * 100) : 0;
+            newIsa.holdings[i] = { ...h, price: newPrice, eval: newEval, pnl, ret };
+            updated++;
+          } else { failed++; }
+        }
+      }
+      setIsaData(newIsa);
+    }
+
+    setLastUpdate(new Date());
+    setLoading(false);
+    const source = usedServer ? "(서버)" : "(Yahoo/Upbit)";
+    setFetchStatus(`✅ ${updated}개 종목 업데이트 완료${failed > 0 ? ` (${failed}개 실패)` : ""} ${source}`);
+    setTimeout(() => setFetchStatus(""), 5000);
+  }, []);
+
+  // 페이지 로드 시 자동 업데이트 + 뉴스 로딩
+  useEffect(() => {
+    refreshPrices();
+    fetchBraveNews("주식시장 오늘 한국 미국 증시 전망").then(setNews);
+  }, []);
+
+  const cashTotal = MY_CASH.hantoo + MY_CASH.upbit;
+
+  const isaHoldingVal = isaData.holdings.reduce((s, h) => s + h.eval, 0);
+  const isaTotal = isaData.cash + isaHoldingVal;
+  const isaPnl = isaData.holdings.reduce((s, h) => s + h.pnl, 0);
+  const isaInvested = isaData.holdings.reduce((s, h) => s + (h.eval - h.pnl), 0);
+  const isaRet = isaInvested > 0 ? (isaPnl / isaInvested * 100) : 0;
+
+  const analysis = useMemo(() => {
+    const mainHolding = holdings.reduce((s, h) => s + h.qty * toKRW(h.price, h.market, usdKrw), 0);
+    const mainInvested = holdings.reduce((s, h) => s + h.qty * toKRW(h.avg, h.market, usdKrw), 0);
+    const mainPnl = mainHolding - mainInvested;
+    const mainTotal = cashTotal + mainHolding;
+
+    const grandTotalAsset = mainTotal + isaTotal;
+    const grandTotalInvested = mainInvested + isaInvested;
+    const grandTotalHolding = mainHolding + isaHoldingVal;
+    const grandTotalPnl = grandTotalAsset - ORIGINAL_INVESTMENT;
+    const grandTotalRet = (grandTotalPnl / ORIGINAL_INVESTMENT * 100);
+    const grandCash = cashTotal + isaData.cash;
+    const grandCashPct = (grandCash / grandTotalAsset * 100);
+
+    const decisions = holdings.map(h => ({ ...h, d: decide(h, cashTotal, grandTotalAsset) }));
+
+    const sectors = {};
+    decisions.forEach(h => { const k = h.market === "CRYPTO" ? "암호화폐" : h.sector; sectors[k] = (sectors[k]||0) + h.d.valKRW; });
+    isaData.holdings.forEach(h => { sectors[h.sector] = (sectors[h.sector]||0) + h.eval; });
+    sectors["현금"] = grandCash;
+
+    return {
+      totalAsset: grandTotalAsset, totalHolding: grandTotalHolding, totalInvested: grandTotalInvested,
+      totalPnl: grandTotalPnl, totalRet: grandTotalRet, cashPct: grandCashPct,
+      mainTotal, mainHolding, mainInvested, mainPnl,
+      decisions, sectors
+    };
+  }, [holdings, isaData, usdKrw]);
+
+  const { totalAsset, totalHolding, totalInvested, totalPnl, totalRet, cashPct, mainTotal, mainHolding, mainInvested, mainPnl, decisions, sectors } = analysis;
+  const sectorArr = Object.entries(sectors).sort((a,b) => b[1]-a[1]);
+  const colors = ["#6366f1","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4","#f97316","#94a3b8"];
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50 pb-8">
+      {/* 헤더 */}
+      <div className="bg-white border-b shadow-sm">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-bold text-gray-900">📊 Stock Advisor <span className="text-xs font-normal bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full ml-1">공격형</span></h1>
+            <p className="text-xs text-gray-400 mt-0.5">한투 + 업비트 + ISA 통합 포트폴리오 · {lastUpdate ? lastUpdate.toLocaleString("ko-KR") : "로딩 중..."} 기준</p>
+            <div className="flex items-center gap-2 mt-1">
+              <button onClick={refreshPrices} disabled={loading} className={`text-xs px-2 py-0.5 rounded-full border ${loading ? "bg-gray-100 text-gray-400" : "bg-white text-indigo-600 hover:bg-indigo-50 border-indigo-300"}`}>
+                {loading ? "⏳ 업데이트 중..." : "🔄 시세 새로고침"}
+              </button>
+              {fetchStatus && <span className="text-xs text-emerald-600">{fetchStatus}</span>}
+              <span className="text-xs text-gray-300">USD/KRW {fmtFull(usdKrw)}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${serverConnected ? "bg-emerald-100 text-emerald-700" : "bg-yellow-100 text-yellow-700"}`}>
+                {serverConnected ? "🟢 서버 연결됨" : "🟡 오프라인 (Yahoo/Upbit fallback)"}
+              </span>
+            </div>
+          </div>
+          <div className="text-right">
+            <p className="text-xs text-gray-400">총 자산</p>
+            <p className="text-2xl font-bold">{fmtFull(totalAsset)}<span className="text-sm font-normal text-gray-500">원</span></p>
+            <p className={`text-sm font-semibold ${pnlColor(totalRet)}`}>{pnlSign(totalRet)}{totalRet.toFixed(2)}% <span className="text-xs font-normal">({pnlSign(totalPnl)}{fmtFull(totalPnl)}원)</span></p>
+          </div>
+        </div>
+      </div>
+
+      {/* 탭 */}
+      <div className="max-w-5xl mx-auto px-4 mt-4 flex gap-1 flex-wrap">
+        {[{id:"dashboard",l:"대시보드",i:"🏠"},{id:"decisions",l:"종목 분석",i:"🤖"},{id:"rebalance",l:"리밸런싱",i:"🔄"},{id:"isa",l:"ISA 계좌",i:"🏦"}].map(t =>
+          <button key={t.id} onClick={() => setTab(t.id)} className={`px-4 py-2 rounded-lg text-sm font-medium ${tab===t.id ? "bg-indigo-600 text-white" : "bg-white text-gray-600 hover:bg-gray-100 border"}`}>{t.i} {t.l}</button>
+        )}
+      </div>
+
+      <div className="max-w-5xl mx-auto px-4 mt-5 space-y-5">
+
+        {/* ════ 대시보드 ════ */}
+        {tab === "dashboard" && <>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <div className="flex items-center gap-1.5 mb-2"><span className="text-xs font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">일반 계좌</span></div>
+              <p className="text-lg font-bold text-gray-900">{fmtFull(mainTotal)}원</p>
+              <p className="text-xs text-gray-400">한투 {fmtFull(MY_CASH.hantoo)} + 업비트 {fmtFull(MY_CASH.upbit)}</p>
+              <p className={`text-xs font-semibold mt-1 ${pnlColor(mainPnl)}`}>{pnlSign(mainPnl)}{fmtFull(mainPnl)}원</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <div className="flex items-center gap-1.5 mb-2"><span className="text-xs font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">ISA 계좌</span></div>
+              <p className="text-lg font-bold text-gray-900">{fmtFull(isaTotal)}원</p>
+              <p className="text-xs text-gray-400">현금 {fmtFull(isaData.cash)} + 주식 {fmtFull(isaHoldingVal)}</p>
+              <p className={`text-xs font-semibold mt-1 ${pnlColor(isaPnl)}`}>{pnlSign(isaPnl)}{fmtFull(isaPnl)}원 ({pnlSign(isaRet)}{isaRet.toFixed(1)}%)</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <div className="flex items-center gap-1.5 mb-2"><span className="text-xs font-bold bg-gray-200 text-gray-700 px-2 py-0.5 rounded-full">총 현금</span></div>
+              <p className="text-lg font-bold text-indigo-700">{fmtFull(cashTotal + isaData.cash)}원</p>
+              <p className="text-xs text-gray-400">일반 {fmtFull(cashTotal)} + ISA {fmtFull(isaData.cash)}</p>
+              <p className="text-xs text-gray-500 mt-1">현금 비중 {cashPct.toFixed(1)}%</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-4 border shadow-sm">
+            <h2 className="text-sm font-bold text-gray-900 mb-3">자산 배분 (통합)</h2>
+            <div className="flex h-6 rounded-full overflow-hidden mb-3">
+              {sectorArr.map(([s,v],i) => <div key={s} style={{width:`${v/totalAsset*100}%`, backgroundColor:colors[i%colors.length]}} title={`${s} ${(v/totalAsset*100).toFixed(1)}%`} />)}
+            </div>
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+              {sectorArr.map(([s,v],i) => (
+                <div key={s} className="flex items-center gap-1.5 text-xs">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{backgroundColor:colors[i%colors.length]}} />
+                  <span className="text-gray-600">{s}</span>
+                  <span className="font-bold text-gray-800">{(v/totalAsset*100).toFixed(1)}%</span>
+                  <span className="text-gray-400">{fmt(v)}원</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-4 border shadow-sm">
+            <div className="flex items-center gap-2 mb-3">
+              <h2 className="text-sm font-bold text-gray-900">보유 종목 현황</h2>
+              <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-semibold">일반 계좌</span>
+            </div>
+            <div className="space-y-2">
+              {decisions.map((h,i) => (
+                <div key={i} className="flex items-center justify-between border rounded-lg p-3 hover:bg-gray-50">
+                  <div className="flex items-center gap-2">
+                    <MktBadge m={h.market} />
+                    <div>
+                      <p className="font-semibold text-sm">{h.name}</p>
+                      <p className="text-xs text-gray-400">{h.qty}{h.market==="CRYPTO"?"":"주"} · {h.market==="US" ? `$${h.price}` : `${fmtFull(h.price)}원`}</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-bold">{fmt(h.d.valKRW)}원</p>
+                    <p className={`text-xs font-semibold ${pnlColor(h.d.ret)}`}>{pnlSign(h.d.ret)}{h.d.ret.toFixed(2)}%</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-4 border shadow-sm border-l-4 border-l-emerald-400">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-gray-900">ISA 계좌</h2>
+                <span className="text-xs bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">중개형 · 비과세</span>
+              </div>
+              <div className="text-right">
+                <p className="text-xs text-gray-400">ISA 총액 <span className="font-bold text-gray-700">{fmtFull(isaTotal)}원</span></p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {isaData.holdings.map((h, i) => (
+                <div key={`isa-${i}`} className="flex items-center justify-between border rounded-lg p-3 hover:bg-gray-50">
+                  <div className="flex items-center gap-2">
+                    <Badge c="green">🏦 ISA</Badge>
+                    <div>
+                      <p className="font-semibold text-sm">{h.name}</p>
+                      <p className="text-xs text-gray-400">{h.qty}주 · {fmtFull(h.price)}원</p>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-sm font-bold">{fmtFull(h.eval)}원</p>
+                    <p className={`text-xs font-semibold ${pnlColor(h.pnl)}`}>{pnlSign(h.pnl)}{fmtFull(h.pnl)}원 ({pnlSign(h.ret)}{h.ret.toFixed(2)}%)</p>
+                  </div>
+                </div>
+              ))}
+              <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <Badge c="gray">💵 예수금</Badge>
+                  <span className="text-sm text-gray-600">ISA 현금</span>
+                </div>
+                <p className="text-sm font-bold text-indigo-700">{fmtFull(isaData.cash)}원</p>
+              </div>
+            </div>
+            <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2 text-xs text-emerald-700">
+              💡 비과세 한도 {fmtFull(isaData.taxFreeLimit)}원 · 잔여 납입한도 {fmtFull(isaData.annualLimit - isaData.totalDeposit)}원 · 만기 2029.02
+            </div>
+          </div>
+
+          {/* 시장 뉴스 (Brave Search) */}
+          {news.length > 0 && (
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <h2 className="text-sm font-bold text-gray-900 mb-3">📰 오늘의 시장 뉴스</h2>
+              <div className="space-y-2">
+                {news.map((n, i) => (
+                  <a key={i} href={n.url} target="_blank" rel="noopener noreferrer" className="block border rounded-lg p-3 hover:bg-indigo-50 transition-colors">
+                    <p className="text-sm font-semibold text-gray-900 line-clamp-1">{n.title}</p>
+                    <p className="text-xs text-gray-500 mt-0.5 line-clamp-1">{n.desc}</p>
+                    {n.age && <p className="text-xs text-gray-300 mt-0.5">{n.age}</p>}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+        </>}
+
+        {/* ════ 종목 분석 (매매판단 + 상세 통합) ════ */}
+        {tab === "decisions" && <>
+          <div className="bg-white rounded-xl p-4 border shadow-sm">
+            <h2 className="text-sm font-bold text-gray-900 mb-1">🤖 종목 분석 · 매매 의사결정</h2>
+            <p className="text-xs text-gray-400 mb-4">기본적 35% + 기술적 45% + 포트폴리오 20% (공격형 가중치)</p>
+          </div>
+
+          {decisions.map((h,i) => {
+            const invested = h.qty * toKRW(h.avg, h.market, usdKrw);
+            const current = h.d.valKRW;
+            const pnl = current - invested;
+            return (
+              <div key={i} className="bg-white rounded-xl p-4 border shadow-sm">
+                {/* 헤더: 종목명 + 매매 판단 */}
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <MktBadge m={h.market} />
+                    <span className="font-bold text-base">{h.name}</span>
+                    <span className="text-xs text-gray-400">{h.code}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge c={h.d.color}>{h.d.action}</Badge>
+                    <span className={`text-lg font-bold ${pnlColor(h.d.ret)}`}>{pnlSign(h.d.ret)}{h.d.ret.toFixed(2)}%</span>
+                  </div>
+                </div>
+
+                {/* 가격 지표 */}
+                <div className="grid grid-cols-4 gap-3 mb-3">
+                  <div className="bg-gray-50 rounded-lg p-2 text-center">
+                    <p className="text-xs text-gray-400">현재가</p>
+                    <p className="text-sm font-bold">{h.market==="US" ? `$${h.price.toLocaleString()}` : `${fmtFull(h.price)}원`}</p>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-2 text-center">
+                    <p className="text-xs text-gray-400">매입가</p>
+                    <p className="text-sm font-bold">{h.market==="US" ? `$${h.avg}` : `${fmtFull(h.avg)}원`}</p>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-2 text-center">
+                    <p className="text-xs text-gray-400">평가금액</p>
+                    <p className="text-sm font-bold">{fmtFull(current)}원</p>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-2 text-center">
+                    <p className="text-xs text-gray-400">손익</p>
+                    <p className={`text-sm font-bold ${pnlColor(pnl)}`}>{pnlSign(pnl)}{fmtFull(pnl)}원</p>
+                  </div>
+                </div>
+
+                {/* 재무 + 기술적 지표 */}
+                <div className="grid grid-cols-2 gap-3 mb-3">
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">재무 지표</p>
+                    <div className="flex gap-3 text-xs">
+                      <span>PER <b>{h.per || "-"}</b></span>
+                      <span>PBR <b>{h.pbr || "-"}</b></span>
+                      <span>ROE <b>{h.roe || "-"}%</b></span>
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs text-gray-400 mb-1">기술적 지표</p>
+                    <div className="flex gap-3 text-xs">
+                      <span>RSI <b>{h.rsi}</b></span>
+                      <span>MACD <b className={h.macd==="bullish"?"text-emerald-600":h.macd==="bearish"?"text-red-600":"text-gray-600"}>{h.macd==="bullish"?"상승":h.macd==="bearish"?"하락":"중립"}</b></span>
+                      <span>비중 <b>{h.d.pct.toFixed(1)}%</b></span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 분석 스코어 바 */}
+                {h.market !== "CRYPTO" ? (
+                  <div className="grid grid-cols-3 gap-3 mb-3">
+                    <Bar label="기본적" score={h.d.fS} />
+                    <Bar label="기술적" score={h.d.tS} />
+                    <Bar label="종합" score={h.d.total} />
+                  </div>
+                ) : (
+                  <div className="mb-3"><Bar label="RSI" score={h.rsi} /></div>
+                )}
+
+                {/* 판단 근거 태그 */}
+                <div className="flex flex-wrap gap-1">
+                  {h.d.reasons.map((r,j) => <span key={j} className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">{r}</span>)}
+                </div>
+
+                {h.note && <p className="mt-2 text-xs text-indigo-600 bg-indigo-50 rounded px-2 py-1">💡 {h.note}</p>}
+              </div>
+            );
+          })}
+
+          <div className="bg-gray-50 border rounded-lg px-4 py-2 text-xs text-gray-500">⚠️ 본 분석은 투자 참고용이며, 실제 투자 결정은 본인의 판단과 책임하에 이루어져야 합니다.</div>
+        </>}
+
+        {/* ════ 리밸런싱 ════ */}
+        {tab === "rebalance" && <>
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+            <h2 className="text-sm font-bold text-emerald-900 mb-2">✅ 리밸런싱 진행 현황</h2>
+            <div className="space-y-1.5 text-xs text-emerald-800">
+              <p>• <b>HD한국조선해양 1주 매수 완료</b> — 조선/해양 섹터 진입 성공</p>
+              <p>• <b>ISA 포트폴리오 구성 완료</b> — 나스닥100 + S&P500 + 유럽스톡스50</p>
+              <p>• <b>종목 수 6개 + ISA 4종</b> — 분산 대폭 개선</p>
+            </div>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+            <h2 className="text-sm font-bold text-amber-900 mb-2">⚠️ 남은 과제</h2>
+            <div className="space-y-1.5 text-xs text-amber-800">
+              <p>• <b>ARM 1주 매도 → 한화에어로 매수</b> — 현재 한투 현금 76만원, 한화에어로 131만원 → ARM 매도 후 재원 확보 필요</p>
+              <p>• <b>ETH 추가매수 검토</b> — 업비트 현금 52만원으로 소량 분할매수 가능</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-4 border shadow-sm">
+            <h2 className="text-sm font-bold text-gray-900 mb-3">📌 실행 우선순위</h2>
+            <div className="space-y-2">
+              {[
+                { pri: "1순위", act: "ARM 1주 매도 → 차익실현", reason: "RSI 과매수 해소, 재원 확보", urgent: true },
+                { pri: "2순위", act: "한화에어로스페이스 1주 매수", reason: "방산 섹터 진입, 반도체 편중 해소", urgent: true },
+                { pri: "✅완료", act: "HD한국조선해양 1주 매수", reason: "저PER 가치주, 조선 슈퍼사이클 — 매수 완료!", urgent: false },
+                { pri: "✅완료", act: "ISA 포트폴리오 구성", reason: "나스닥+S&P500+유럽 ETF 분산 투자 완료", urgent: false },
+                { pri: "✅1차", act: "ETH 25만원 분할매수 완료", reason: "트리플 과매도 구간 — 2주 후 2차 매수 검토", urgent: false },
+              ].map((item,i) => (
+                <div key={i} className={`flex items-center gap-3 rounded-lg p-2.5 ${item.urgent ? "bg-indigo-50 border border-indigo-200" : "bg-gray-50 border border-gray-200"}`}>
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded ${item.urgent ? "bg-indigo-600 text-white" : "bg-gray-300 text-gray-700"}`}>{item.pri}</span>
+                  <div>
+                    <p className="text-sm font-semibold text-gray-900">{item.act}</p>
+                    <p className="text-xs text-gray-500">{item.reason}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="bg-gray-50 border rounded-lg px-4 py-2 text-xs text-gray-500">⚠️ 위 추천은 2026-03-30 기준 참고용 분석입니다.</div>
+        </>}
+
+        {/* ════ ISA 계좌 ════ */}
+        {tab === "isa" && (() => {
+          const _isaTotal = isaData.cash + isaData.holdings.reduce((s, h) => s + h.eval, 0);
+          const _isaPnl = isaData.holdings.reduce((s, h) => s + h.pnl, 0);
+          const _isaRet = (isaData.totalDeposit - isaData.cash) > 0 ? (_isaPnl / (isaData.totalDeposit - isaData.cash) * 100) : 0;
+          const depositPct = (isaData.totalDeposit / isaData.annualLimit * 100);
+          const _isaInvested = isaData.holdings.reduce((s, h) => s + (h.eval - h.pnl), 0);
+          const taxFreeUsed = Math.max(0, _isaPnl);
+          const taxFreeRemain = Math.max(0, isaData.taxFreeLimit - taxFreeUsed);
+          const taxableAmount = Math.max(0, _isaPnl - isaData.taxFreeLimit);
+          const taxDue = taxableAmount * (isaData.overTaxRate / 100);
+          const openDate = new Date("2026-02-01");
+          const maturityDate = new Date(openDate);
+          maturityDate.setFullYear(maturityDate.getFullYear() + isaData.mandatoryYears);
+          const now = new Date();
+          const daysRemain = Math.ceil((maturityDate - now) / (1000 * 60 * 60 * 24));
+          const monthsHeld = Math.round((now - openDate) / (1000 * 60 * 60 * 24 * 30));
+
+          return <>
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h2 className="text-sm font-bold text-gray-900">🏦 ISA 중개형 계좌</h2>
+                  <p className="text-xs text-gray-400">{isaData.account} · {isaData.opened} 개설 · 의무보유 {isaData.mandatoryYears}년</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xs text-gray-400">계좌 총액</p>
+                  <p className="text-xl font-bold">{fmtFull(_isaTotal)}<span className="text-sm font-normal text-gray-500">원</span></p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-indigo-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-indigo-500">예수금</p>
+                  <p className="text-lg font-bold text-indigo-700">{fmtFull(isaData.cash)}원</p>
+                </div>
+                <div className="bg-emerald-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-emerald-500">주식 평가</p>
+                  <p className="text-lg font-bold text-emerald-700">{fmtFull(_isaInvested + _isaPnl)}원</p>
+                  <p className={`text-xs font-semibold ${pnlColor(_isaPnl)}`}>{pnlSign(_isaPnl)}{fmtFull(_isaPnl)}원</p>
+                </div>
+                <div className="bg-amber-50 rounded-lg p-3 text-center">
+                  <p className="text-xs text-amber-500">의무보유 잔여</p>
+                  <p className="text-lg font-bold text-amber-700">{daysRemain}일</p>
+                  <p className="text-xs text-amber-400">{monthsHeld}개월 / {isaData.mandatoryYears * 12}개월</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <h2 className="text-sm font-bold text-gray-900 mb-3">💰 연간 납입 현황</h2>
+              <div className="flex items-center gap-3 mb-2">
+                <div className="flex-1 h-4 bg-gray-200 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-500 rounded-full" style={{width:`${Math.min(100, depositPct)}%`}} />
+                </div>
+                <span className="text-sm font-bold text-indigo-700">{depositPct.toFixed(1)}%</span>
+              </div>
+              <p className="text-xs text-gray-500">{fmtFull(isaData.totalDeposit)}원 / {fmtFull(isaData.annualLimit)}원 (잔여 {fmtFull(isaData.annualLimit - isaData.totalDeposit)}원)</p>
+            </div>
+
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <h2 className="text-sm font-bold text-gray-900 mb-3">🧾 세금 혜택</h2>
+              <div className="grid grid-cols-2 gap-3 mb-3">
+                <div className="border rounded-lg p-3">
+                  <p className="text-xs text-gray-400">비과세 한도</p>
+                  <p className="text-lg font-bold text-emerald-700">{fmtFull(isaData.taxFreeLimit)}원</p>
+                  <p className="text-xs text-emerald-600 mt-1">남은 비과세: {fmtFull(taxFreeRemain)}원</p>
+                </div>
+                <div className="border rounded-lg p-3">
+                  <p className="text-xs text-gray-400">손익통산</p>
+                  <p className={`text-lg font-bold ${pnlColor(_isaPnl)}`}>{pnlSign(_isaPnl)}{fmtFull(_isaPnl)}원</p>
+                  <p className="text-xs text-gray-500 mt-1">예상 세금: {taxDue > 0 ? fmtFull(taxDue) + "원" : "0원"}</p>
+                </div>
+              </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
+                💡 ISA 내 4개 ETF 손익이 합산되어 순이익에만 과세됩니다.
+              </div>
+            </div>
+
+            <div className="bg-white rounded-xl p-4 border shadow-sm">
+              <h2 className="text-sm font-bold text-gray-900 mb-3">📊 ISA 보유 종목</h2>
+              <div className="space-y-2">
+                {isaData.holdings.map((h, i) => (
+                  <div key={i} className="flex items-center justify-between border rounded-lg p-3 hover:bg-gray-50">
+                    <div className="flex items-center gap-2">
+                      <Badge c="blue">🇰🇷 ETF</Badge>
+                      <div>
+                        <p className="font-semibold text-sm">{h.name}</p>
+                        <p className="text-xs text-gray-400">{h.code} · {h.qty}주 · 평단 {fmtFull(h.avg)}원</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-bold">{fmtFull(h.eval)}원</p>
+                      <p className={`text-xs font-semibold ${pnlColor(h.pnl)}`}>{pnlSign(h.pnl)}{fmtFull(h.pnl)}원 ({pnlSign(h.ret)}{h.ret.toFixed(2)}%)</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+              <p className="text-xs font-bold text-amber-800 mb-1">📋 관리 포인트</p>
+              <div className="space-y-1 text-xs text-amber-800">
+                <p>• 2029.02 전 해지 시 세금 혜택 반환 · 올해 잔여 3,500만원 납입 가능 · 분기 1회 비중 점검</p>
+              </div>
+            </div>
+          </>;
+        })()}
+
+        {/* 종목 상세 탭은 종목 분석 탭으로 통합됨 */}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<StockAdvisor />);
+</script>
+</body>
+</html>
