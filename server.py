@@ -141,6 +141,26 @@ async def kis_domestic_balance():
             "returnPct": float(item.get("evlu_pfls_rt", 0)),
         })
 
+    # 각 종목별 실시간 현재가 API로 가격 보정 (잔고 API의 prpr이 부정확한 경우 대비)
+    for h in holdings:
+        try:
+            price_headers = kis_headers(token, "FHKST01010100")
+            price_params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": h["code"]}
+            async with httpx.AsyncClient(verify=False, timeout=5) as client:
+                price_resp = await client.get(
+                    f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+                    headers=price_headers, params=price_params,
+                )
+                price_data = price_resp.json()
+                real_price = float(price_data.get("output", {}).get("stck_prpr", 0))
+                if real_price > 0:
+                    h["currentPrice"] = real_price
+                    h["evalAmount"] = h["quantity"] * real_price
+                    h["evalPnl"] = h["evalAmount"] - (h["quantity"] * h["avgPrice"])
+                    h["returnPct"] = ((real_price - h["avgPrice"]) / h["avgPrice"] * 100) if h["avgPrice"] > 0 else 0
+        except Exception:
+            pass  # 시세 조회 실패시 잔고 API 가격 유지
+
     # output2에서 계좌 요약
     summary = data.get("output2", [{}])
     if isinstance(summary, list) and summary:
