@@ -471,6 +471,33 @@ async def get_full_portfolio():
     # 해외 주식
     try:
         results["overseas"] = await kis_overseas_balance()
+        # 각 해외 종목별 실시간 현재가 API로 가격 보정
+        if results["overseas"] and results["overseas"].get("holdings"):
+            for h in results["overseas"]["holdings"]:
+                try:
+                    token = await get_kis_token()
+                    price_headers = kis_headers(token, "HHDFS76200200")
+                    excg_map = {"NASD": "NAS", "NYSE": "NYS", "AMEX": "AMS"}
+                    excg_cd = excg_map.get(h.get("exchange", "NASD"), "NAS")
+                    price_params = {
+                        "AUTH": "",
+                        "EXCD": excg_cd,
+                        "SYMB": h["code"],
+                    }
+                    async with httpx.AsyncClient(verify=False, timeout=5) as client:
+                        price_resp = await client.get(
+                            f"{KIS_BASE_URL}/uapi/overseas-price/v1/quotations/price",
+                            headers=price_headers, params=price_params,
+                        )
+                        price_data = price_resp.json()
+                        real_price = float(price_data.get("output", {}).get("last", 0))
+                        if real_price > 0:
+                            h["currentPrice"] = real_price
+                            h["evalAmount"] = h["quantity"] * real_price
+                            h["evalPnl"] = h["evalAmount"] - (h["quantity"] * h["avgPrice"])
+                            h["returnPct"] = ((real_price - h["avgPrice"]) / h["avgPrice"] * 100) if h["avgPrice"] > 0 else 0
+                except Exception:
+                    pass
     except Exception as e:
         results["errors"].append(f"해외 주식 조회 실패: {str(e)}")
 
@@ -589,3 +616,4 @@ if __name__ == "__main__":
     print(f"  업비트 API: {'✅ 설정됨' if UPBIT_ACCESS_KEY else '❌ 미설정'}")
     print("=" * 50)
     uvicorn.run(app, host="0.0.0.0", port=8001)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
