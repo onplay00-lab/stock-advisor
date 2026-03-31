@@ -36,12 +36,31 @@ async function fetchUpbit(market) {
 }
 
 async function fetchExchangeRate() {
+  // 1차: 두나무 API (업비트 환율)
+  try {
+    const res1 = await fetch("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD", { signal: AbortSignal.timeout(5000) });
+    const data1 = await res1.json();
+    if (data1?.[0]?.basePrice > 0) return data1[0].basePrice;
+  } catch {}
+  // 2차: Yahoo Finance via CORS proxy
   try {
     const url = `${CORS_PROXY}${encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X?range=1d&interval=1d")}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
-    return data?.chart?.result?.[0]?.meta?.regularMarketPrice || 1509;
-  } catch { return 1509; }
+    const rate = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+    if (rate > 0) return rate;
+  } catch {}
+  // 3차: 한국은행 Open API (공시 환율) via CORS proxy
+  try {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const bokUrl = `${CORS_PROXY}${encodeURIComponent(`https://www.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=SAMPLE&searchdate=${dateStr}&data=AP01`)}`;
+    const res3 = await fetch(bokUrl, { signal: AbortSignal.timeout(5000) });
+    const data3 = await res3.json();
+    const usd = data3?.find(d => d.cur_unit === "USD");
+    if (usd) { const v = parseFloat(usd.deal_bas_r.replace(/,/g, "")); if (v > 0) return v; }
+  } catch {}
+  return 1509;
 }
 
 // ─── Brave Search API (뉴스/시장 정보) ──────────────────────
@@ -189,6 +208,7 @@ function StockAdvisor() {
   const [tab, setTab] = useState("dashboard");
   const [holdings, setHoldings] = useState(MY_HOLDINGS);
   const [isaData, setIsaData] = useState(ISA);
+  const [cashData, setCashData] = useState(MY_CASH);
   const [usdKrw, setUsdKrw] = useState(DEFAULT_USD_KRW);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -214,10 +234,13 @@ function StockAdvisor() {
       usedServer = true;
       setServerConnected(true);
 
-      // 환율 업데이트 (서버에서 제공)
-      if (serverData.exchangeRate) {
-        setUsdKrw(serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW);
-        DEFAULT_USD_KRW = serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW;
+      // 환율 업데이트 (서버에서 제공, 실패 시 직접 조회)
+      if (serverData.exchangeRate && serverData.exchangeRate.usdKrw && serverData.exchangeRate.usdKrw !== 1450) {
+        setUsdKrw(serverData.exchangeRate.usdKrw);
+        DEFAULT_USD_KRW = serverData.exchangeRate.usdKrw;
+      } else {
+        const rate = await fetchExchangeRate();
+        if (rate) { setUsdKrw(rate); DEFAULT_USD_KRW = rate; }
       }
 
       // 국내 주식 매핑 (서버 데이터 + 분석 파라미터)
@@ -296,6 +319,17 @@ function StockAdvisor() {
 
       setHoldings([...mappedDomestic, ...mappedOverseas, ...mappedCrypto, ...remainingHoldings]);
       setIsaData(mappedIsa);
+
+      // 현금 잔액 업데이트 (서버에서 가져오기)
+      const newCash = { ...MY_CASH };
+      if (serverData.domestic && serverData.domestic.summary) {
+        newCash.hantoo = serverData.domestic.summary.availableCash || MY_CASH.hantoo;
+      }
+      if (serverData.crypto && serverData.crypto.summary) {
+        newCash.upbit = serverData.crypto.summary.krwBalance || MY_CASH.upbit;
+      }
+      setCashData(newCash);
+
       updated = mappedDomestic.length + mappedOverseas.length + mappedCrypto.length + mappedIsa.holdings.length;
     } else {
       // 서버 미연결: 폴백 (Yahoo/Upbit)
@@ -356,7 +390,7 @@ function StockAdvisor() {
     fetchBraveNews("주식시장 오늘 한국 미국 증시 전망").then(setNews);
   }, []);
 
-  const cashTotal = MY_CASH.hantoo + MY_CASH.upbit;
+  const cashTotal = cashData.hantoo + cashData.upbit;
 
   const isaHoldingVal = isaData.holdings.reduce((s, h) => s + h.eval, 0);
   const isaTotal = isaData.cash + isaHoldingVal;
@@ -391,7 +425,7 @@ function StockAdvisor() {
       mainTotal, mainHolding, mainInvested, mainPnl,
       decisions, sectors
     };
-  }, [holdings, isaData, usdKrw]);
+  }, [holdings, isaData, usdKrw, cashData]);
 
   const { totalAsset, totalHolding, totalInvested, totalPnl, totalRet, cashPct, mainTotal, mainHolding, mainInvested, mainPnl, decisions, sectors } = analysis;
   const sectorArr = Object.entries(sectors).sort((a,b) => b[1]-a[1]);
@@ -439,7 +473,7 @@ function StockAdvisor() {
             <div className="bg-white rounded-xl p-4 border shadow-sm">
               <div className="flex items-center gap-1.5 mb-2"><span className="text-xs font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">일반 계좌</span></div>
               <p className="text-lg font-bold text-gray-900">{fmtFull(mainTotal)}원</p>
-              <p className="text-xs text-gray-400">한투 {fmtFull(MY_CASH.hantoo)} + 업비트 {fmtFull(MY_CASH.upbit)}</p>
+              <p className="text-xs text-gray-400">한투 {fmtFull(cashData.hantoo)} + 업비트 {fmtFull(cashData.upbit)}</p>
               <p className={`text-xs font-semibold mt-1 ${pnlColor(mainPnl)}`}>{pnlSign(mainPnl)}{fmtFull(mainPnl)}원</p>
             </div>
             <div className="bg-white rounded-xl p-4 border shadow-sm">
@@ -657,8 +691,8 @@ function StockAdvisor() {
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
             <h2 className="text-sm font-bold text-amber-900 mb-2">⚠️ 남은 과제</h2>
             <div className="space-y-1.5 text-xs text-amber-800">
-              <p>• <b>ARM 1주 매도 → 한화에어로 매수</b> — 현재 한투 현금 76만원, 한화에어로 131만원 → ARM 매도 후 재원 확보 필요</p>
-              <p>• <b>ETH 추가매수 검토</b> — 업비트 현금 52만원으로 소량 분할매수 가능</p>
+              <p>• <b>ARM 1주 매도 → 한화에어로 매수</b> — 현재 한투 현금 {fmt(cashData.hantoo)}원, 한화에어로 131만원 → ARM 매도 후 재원 확보 필요</p>
+              <p>• <b>ETH 추가매수 검토</b> — 업비트 현금 {fmt(cashData.upbit)}원으로 소량 분할매수 가능</p>
             </div>
           </div>
 

@@ -36,12 +36,31 @@ async function fetchUpbit(market) {
 }
 
 async function fetchExchangeRate() {
+  // 1차: 두나무 API (업비트 환율)
+  try {
+    const res1 = await fetch("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD", { signal: AbortSignal.timeout(5000) });
+    const data1 = await res1.json();
+    if (data1?.[0]?.basePrice > 0) return data1[0].basePrice;
+  } catch {}
+  // 2차: Yahoo Finance via CORS proxy
   try {
     const url = `${CORS_PROXY}${encodeURIComponent("https://query1.finance.yahoo.com/v8/finance/chart/USDKRW=X?range=1d&interval=1d")}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
-    return data?.chart?.result?.[0]?.meta?.regularMarketPrice || 1509;
-  } catch { return 1509; }
+    const rate = data?.chart?.result?.[0]?.meta?.regularMarketPrice;
+    if (rate > 0) return rate;
+  } catch {}
+  // 3차: 한국은행 Open API (공시 환율) via CORS proxy
+  try {
+    const today = new Date();
+    const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
+    const bokUrl = `${CORS_PROXY}${encodeURIComponent(`https://www.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=SAMPLE&searchdate=${dateStr}&data=AP01`)}`;
+    const res3 = await fetch(bokUrl, { signal: AbortSignal.timeout(5000) });
+    const data3 = await res3.json();
+    const usd = data3?.find(d => d.cur_unit === "USD");
+    if (usd) { const v = parseFloat(usd.deal_bas_r.replace(/,/g, "")); if (v > 0) return v; }
+  } catch {}
+  return 1509;
 }
 
 // ─── Brave Search API (뉴스/시장 정보) ──────────────────────
@@ -215,10 +234,13 @@ function StockAdvisor() {
       usedServer = true;
       setServerConnected(true);
 
-      // 환율 업데이트 (서버에서 제공)
-      if (serverData.exchangeRate) {
-        setUsdKrw(serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW);
-        DEFAULT_USD_KRW = serverData.exchangeRate.usdKrw || DEFAULT_USD_KRW;
+      // 환율 업데이트 (서버에서 제공, 실패 시 직접 조회)
+      if (serverData.exchangeRate && serverData.exchangeRate.usdKrw && serverData.exchangeRate.usdKrw !== 1450) {
+        setUsdKrw(serverData.exchangeRate.usdKrw);
+        DEFAULT_USD_KRW = serverData.exchangeRate.usdKrw;
+      } else {
+        const rate = await fetchExchangeRate();
+        if (rate) { setUsdKrw(rate); DEFAULT_USD_KRW = rate; }
       }
 
       // 국내 주식 매핑 (서버 데이터 + 분석 파라미터)
