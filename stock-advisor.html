@@ -53,6 +53,26 @@ async function fetchUpbit(market) {
   } catch { return null; }
 }
 
+async function fetchNaverPrice(stockCode) {
+  // 네이버 금융 API로 한국 주식 현재가 조회
+  try {
+    const url = `${CORS_PROXY}${encodeURIComponent(`https://m.stock.naver.com/api/stock/${stockCode}/basic`)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+    const data = await res.json();
+    const price = parseFloat(data?.currentPrice?.replace(/,/g, ""));
+    if (price > 0) return price;
+  } catch {}
+  // 2차: 네이버 시세 페이지 스크래핑
+  try {
+    const url2 = `${CORS_PROXY}${encodeURIComponent(`https://finance.naver.com/item/main.naver?code=${stockCode}`)}`;
+    const res2 = await fetch(url2, { signal: AbortSignal.timeout(5000) });
+    const text = await res2.text();
+    const match = text.match(/현재가\s*<\/dt>\s*<dd>\s*<strong>([\d,]+)/);
+    if (match) { const v = parseFloat(match[1].replace(/,/g, "")); if (v > 0) return v; }
+  } catch {}
+  return null;
+}
+
 async function fetchExchangeRate() {
   // 1차: 두나무 API (업비트 환율)
   try {
@@ -364,7 +384,15 @@ function StockAdvisor() {
         let newPrice = null;
         if (h.market === "CRYPTO") {
           newPrice = await fetchUpbit("KRW-ETH");
+        } else if (h.market === "KRX") {
+          // 한국 주식: 네이버 우선 → Yahoo fallback
+          newPrice = await fetchNaverPrice(h.code);
+          if (!newPrice) {
+            const sym = YAHOO_MAP[h.code];
+            if (sym) newPrice = await fetchYahoo(sym);
+          }
         } else {
+          // 미국 주식: Yahoo
           const sym = YAHOO_MAP[h.code];
           if (sym) newPrice = await fetchYahoo(sym);
         }
@@ -379,18 +407,20 @@ function StockAdvisor() {
       const newIsa = { ...ISA, holdings: [...ISA.holdings] };
       for (let i = 0; i < newIsa.holdings.length; i++) {
         const h = newIsa.holdings[i];
-        const sym = YAHOO_MAP[h.code];
-        if (sym) {
-          const newPrice = await fetchYahoo(sym);
-          if (newPrice) {
-            const newEval = h.qty * newPrice;
-            const invested = h.qty * h.avg;
-            const pnl = newEval - invested;
-            const ret = invested > 0 ? (pnl / invested * 100) : 0;
-            newIsa.holdings[i] = { ...h, price: newPrice, eval: newEval, pnl, ret };
-            updated++;
-          } else { failed++; }
+        // ISA는 국내 ETF이므로 네이버 우선 → Yahoo fallback
+        let newPrice = await fetchNaverPrice(h.code);
+        if (!newPrice) {
+          const sym = YAHOO_MAP[h.code];
+          if (sym) newPrice = await fetchYahoo(sym);
         }
+        if (newPrice) {
+          const newEval = h.qty * newPrice;
+          const invested = h.qty * h.avg;
+          const pnl = newEval - invested;
+          const ret = invested > 0 ? (pnl / invested * 100) : 0;
+          newIsa.holdings[i] = { ...h, price: newPrice, eval: newEval, pnl, ret };
+          updated++;
+        } else { failed++; }
       }
       setIsaData(newIsa);
     }
