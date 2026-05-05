@@ -17,8 +17,27 @@ const { useState, useMemo, useEffect, useCallback } = React;
 // ─── 실시간 시세 연동 엔진 ─────────────────────────────────────
 const CORS_PROXY = "https://api.allorigins.win/raw?url=";
 
+// 자체 서버 시세 프록시 (Vercel serverless / 로컬 server.py 양쪽 동작).
+// 페이지가 .vercel.app 에서 열렸으면 same-origin (""), 아니면 localhost:8001.
+const PRICE_API_BASE = (typeof window !== "undefined" && /\.vercel\.app$|\.netlify\.app$|^https?:\/\/(?!localhost|127\.)/.test(window.location.origin))
+  ? ""
+  : "http://localhost:8001";
+
+async function fetchPriceProxy(market, code) {
+  try {
+    const url = `${PRICE_API_BASE}/api/price?market=${encodeURIComponent(market)}&code=${encodeURIComponent(code)}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(6000) });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.price && data.price > 0 ? { price: data.price, currency: data.currency || "KRW" } : null;
+  } catch { return null; }
+}
+
 async function fetchYahoo(symbol) {
-  // 1차: Yahoo Finance
+  // 0차: 자체 서버 프록시 (CORS 우회 + 안정적)
+  const proxied = await fetchPriceProxy("US", symbol);
+  if (proxied) return proxied.price;
+  // 1차: Yahoo Finance via 공용 CORS proxy (폴백)
   try {
     const url = `${CORS_PROXY}${encodeURIComponent(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1d`)}`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
@@ -34,63 +53,39 @@ async function fetchYahoo(symbol) {
     const price = data2?.quoteResponse?.result?.[0]?.regularMarketPrice;
     if (price > 0) return price;
   } catch {}
-  // 3차: Google Finance 스크래핑 via CORS proxy
-  try {
-    const url3 = `${CORS_PROXY}${encodeURIComponent(`https://www.google.com/finance/quote/${symbol}:NASDAQ`)}`;
-    const res3 = await fetch(url3, { signal: AbortSignal.timeout(8000) });
-    const text = await res3.text();
-    const match = text.match(/data-last-price="([\d.]+)"/);
-    if (match && parseFloat(match[1]) > 0) return parseFloat(match[1]);
-  } catch {}
   return null;
 }
 
 async function fetchUpbit(market) {
+  // 업비트는 CORS 허용이라 직접 호출 가능. 단 차단/장애 대비 자체 프록시도 시도.
   try {
     const res = await fetch(`https://api.upbit.com/v1/ticker?markets=${market}`, { signal: AbortSignal.timeout(5000) });
     const data = await res.json();
-    return data?.[0]?.trade_price || null;
-  } catch { return null; }
+    if (data?.[0]?.trade_price) return data[0].trade_price;
+  } catch {}
+  const proxied = await fetchPriceProxy("CRYPTO", market);
+  return proxied ? proxied.price : null;
 }
 
 async function fetchNaverPrice(stockCode) {
+  // 0차: 자체 서버 프록시 (CORS 우회 + 안정적)
+  const proxied = await fetchPriceProxy("KRX", stockCode);
+  if (proxied) return proxied.price;
+  // 1차 폴백: 공용 CORS 프록시 → 네이버 모바일 주식 API
   const PROXIES = [
     (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
     (u) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
     (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
   ];
-  // 1차: 네이버 모바일 주식 API (JSON)
   for (const proxy of PROXIES) {
     try {
       const url = proxy(`https://m.stock.naver.com/api/stock/${stockCode}/basic`);
       const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
       const data = await res.json();
-      const raw = data?.currentPrice || data?.closePrice;
+      const raw = data?.closePrice || data?.currentPrice;
       if (raw) { const price = parseFloat(String(raw).replace(/,/g, "")); if (price > 0) return price; }
     } catch {}
   }
-  // 2차: 네이버 금융 데이터 API (시세 조회)
-  for (const proxy of PROXIES) {
-    try {
-      const url2 = proxy(`https://fchart.stock.naver.com/siseJson.nhn?symbol=${stockCode}&requestType=1&startTime=20260401&endTime=20260402&timeframe=day`);
-      const res2 = await fetch(url2, { signal: AbortSignal.timeout(5000) });
-      const text = await res2.text();
-      const match = text.match(/(\d+)\s*\]\s*\n?\s*\]/);
-      if (match) { const v = parseFloat(match[1]); if (v > 0) return v; }
-    } catch {}
-  }
-  // 3차: KRX 정보데이터시스템 open API
-  try {
-    const res3 = await fetch(`https://data.krx.co.kr/comm/bldAttend498/getJsonData.cmd`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: `bld=dbms/MDC/STAT/standard/MDCSTAT01501&isuCd=${stockCode}`,
-      signal: AbortSignal.timeout(5000),
-    });
-    const data3 = await res3.json();
-    const item = data3?.OutBlock_1?.[0];
-    if (item) { const v = parseFloat(item.TDD_CLSPRC?.replace(/,/g, "")); if (v > 0) return v; }
-  } catch {}
   return null;
 }
 
@@ -184,13 +179,15 @@ const toKRW = (price, market, usdKrw) => (market === "US" ? parseFloat(price) * 
 const MY_CASH = { hantoo: 765982, upbit: 277279 }; // ETH 25만원 추가매수 후
 const ORIGINAL_INVESTMENT = 10000000; // 원금: 한투 300 + 업비트 200 + ISA 500 = 1,000만원
 
+// 가격은 페이지 로드 시 자체 시세 API(/api/price)로 자동 갱신됨.
+// 하드코딩 값은 폴백용 (2026-05-04 기준 KIS 앱 시세).
 const MY_HOLDINGS = [
-  { name: "SK하이닉스", code: "000660", market: "KRX", sector: "반도체", qty: 1, avg: 919000, price: 869000, per: 2.8, pbr: 2.5, roe: 72.4, rsi: 42, macd: "bearish", note: "HBM4 엔비디아 공급 70% 확보" },
-  { name: "리노공업", code: "058470", market: "KRX", sector: "반도체 부품", qty: 4, avg: 98700, price: 98400, per: 24.9, pbr: 4.7, roe: 20.1, rsi: 51.5, macd: "neutral", note: "AI ASIC 테스트소켓 수혜" },
-  { name: "ARM Holdings", code: "ARM", market: "US", sector: "반도체 설계", qty: 2, avg: 121.78, price: 136.96, per: 81, pbr: 18, roe: 11.3, rsi: 72, macd: "bearish", note: "RSI 과매수, MA 12개 전부 매도시그널" },
-  { name: "Vertiv Holdings", code: "VRT", market: "US", sector: "데이터센터 인프라", qty: 2, avg: 244.88, price: 234.22, per: 78.1, pbr: 15, roe: 41.8, rsi: 62, macd: "bullish", note: "사상최고가 $282 후 조정중, 애널리스트 Strong Buy 컨센서스 목표가 $271" },
-  { name: "이더리움 (ETH)", code: "ETH", market: "CRYPTO", sector: "암호화폐", qty: 0.5935, avg: 2903399, price: 3093000, per: 0, pbr: 0, roe: 0, rsi: 25, macd: "bearish", note: "트리플 과매도, 공포지수 14 — 25만원 분할매수 1차 완료" },
-  { name: "HD한국조선해양", code: "009540", market: "KRX", sector: "조선/해양", qty: 1, avg: 345500, price: 345000, per: 9.1, pbr: 1.2, roe: 12.5, rsi: 55, macd: "bullish", note: "LNG선 수주 호조, 미해군 MRO 진출, PER 9배 저평가" },
+  { name: "SK하이닉스", code: "000660", market: "KRX", sector: "반도체", qty: 1, avg: 919000, price: 1447000, per: 2.8, pbr: 2.5, roe: 72.4, rsi: 42, macd: "bearish", note: "HBM4 엔비디아 공급 70% 확보" },
+  { name: "리노공업", code: "058470", market: "KRX", sector: "반도체 부품", qty: 4, avg: 98700, price: 120800, per: 24.9, pbr: 4.7, roe: 20.1, rsi: 51.5, macd: "neutral", note: "AI ASIC 테스트소켓 수혜" },
+  { name: "ARM Holdings", code: "ARM", market: "US", sector: "반도체 설계", qty: 2, avg: 121.78, price: 200.00, per: 81, pbr: 18, roe: 11.3, rsi: 72, macd: "bearish", note: "RSI 과매수, MA 12개 전부 매도시그널" },
+  { name: "Vertiv Holdings", code: "VRT", market: "US", sector: "데이터센터 인프라", qty: 2, avg: 244.88, price: 325.66, per: 78.1, pbr: 15, roe: 41.8, rsi: 62, macd: "bullish", note: "사상최고가 $282 후 조정중, 애널리스트 Strong Buy 컨센서스 목표가 $271" },
+  { name: "이더리움 (ETH)", code: "ETH", market: "CRYPTO", sector: "암호화폐", qty: 0.5935, avg: 2903399, price: 3528000, per: 0, pbr: 0, roe: 0, rsi: 25, macd: "bearish", note: "트리플 과매도, 공포지수 14 — 25만원 분할매수 1차 완료" },
+  { name: "HD한국조선해양", code: "009540", market: "KRX", sector: "조선/해양", qty: 1, avg: 345500, price: 469500, per: 9.1, pbr: 1.2, roe: 12.5, rsi: 55, macd: "bullish", note: "LNG선 수주 호조, 미해군 MRO 진출, PER 9배 저평가" },
 ];
 
 // ─── ISA 계좌 (중개형, 2026.02 개설, 의무보유 3년) ─────────────
@@ -205,10 +202,10 @@ const ISA = {
   taxFreeLimit: 2000000,
   overTaxRate: 9.9,
   holdings: [
-    { name: "TIGER 미국나스닥100", code: "133690", qty: 10, avg: 154040, price: 154010, eval: 1540100, pnl: -300, ret: -0.01, sector: "미국 나스닥 성장주" },
-    { name: "TIGER 미국S&P500", code: "360750", qty: 50, avg: 24325, price: 23770, eval: 1188500, pnl: -27750, ret: -2.28, sector: "미국 대형주 인덱스" },
-    { name: "KODEX 미국S&P500", code: "379800", qty: 46, avg: 21725, price: 21725, eval: 999350, pnl: 0, ret: 0, sector: "미국 대형주 인덱스" },
-    { name: "TIGER 유로스톡스50(합성H)", code: "195930", qty: 40, avg: 19905, price: 19905, eval: 796200, pnl: 0, ret: 0, sector: "유럽 선진국" },
+    { name: "TIGER 미국나스닥100", code: "133690", qty: 10, avg: 154040, price: 180055, eval: 1800550, pnl: 260150, ret: 16.88, sector: "미국 나스닥 성장주" },
+    { name: "TIGER 미국S&P500", code: "360750", qty: 50, avg: 24325, price: 26340, eval: 1317000, pnl: 100750, ret: 8.28, sector: "미국 대형주 인덱스" },
+    { name: "KODEX 미국S&P500", code: "379800", qty: 46, avg: 21725, price: 23970, eval: 1102620, pnl: 103270, ret: 10.33, sector: "미국 대형주 인덱스" },
+    { name: "TIGER 유로스톡스50(합성H)", code: "195930", qty: 40, avg: 19905, price: 21555, eval: 862200, pnl: 66000, ret: 8.28, sector: "유럽 선진국" },
   ],
 };
 

@@ -431,6 +431,55 @@ async def upbit_accounts():
     }
 
 
+@app.get("/api/price")
+async def price_proxy(market: str, code: str):
+    """프론트 CORS 우회용 시세 프록시 (네이버/Yahoo/업비트)."""
+    market = market.upper()
+    UA = "Mozilla/5.0"
+    async with httpx.AsyncClient(timeout=6.0, headers={"User-Agent": UA}) as client:
+        if market == "KRX":
+            try:
+                r = await client.get(f"https://m.stock.naver.com/api/stock/{code}/basic")
+                d = r.json()
+                raw = d.get("closePrice") or d.get("currentPrice")
+                if raw:
+                    p = float(str(raw).replace(",", ""))
+                    if p > 0:
+                        return {"price": p, "source": "naver", "currency": "KRW"}
+            except Exception:
+                pass
+            try:
+                r = await client.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{code}.KS?range=1d&interval=1d")
+                meta = r.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
+                p = meta.get("regularMarketPrice")
+                if p and p > 0:
+                    return {"price": float(p), "source": "yahoo", "currency": meta.get("currency", "KRW")}
+            except Exception:
+                pass
+        elif market == "US":
+            for host in ("query1", "query2"):
+                try:
+                    r = await client.get(f"https://{host}.finance.yahoo.com/v8/finance/chart/{code}?range=1d&interval=1d")
+                    meta = r.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
+                    p = meta.get("regularMarketPrice")
+                    if p and p > 0:
+                        return {"price": float(p), "source": "yahoo", "currency": meta.get("currency", "USD")}
+                except Exception:
+                    continue
+        elif market == "CRYPTO":
+            m = code if code.startswith("KRW-") else f"KRW-{code}"
+            try:
+                r = await client.get(f"{UPBIT_BASE_URL}/v1/ticker", params={"markets": m})
+                arr = r.json()
+                if arr and arr[0].get("trade_price"):
+                    return {"price": float(arr[0]["trade_price"]), "source": "upbit", "currency": "KRW"}
+            except Exception:
+                pass
+        else:
+            raise HTTPException(status_code=400, detail="market은 KRX|US|CRYPTO 중 하나")
+    raise HTTPException(status_code=404, detail=f"시세 조회 실패: {market}/{code}")
+
+
 @app.get("/api/upbit/ticker/{market}")
 async def upbit_ticker(market: str):
     """업비트 특정 코인 시세 조회"""
