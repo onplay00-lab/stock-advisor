@@ -42,6 +42,11 @@ UPBIT_ACCESS_KEY = os.getenv("UPBIT_ACCESS_KEY", "")
 UPBIT_SECRET_KEY = os.getenv("UPBIT_SECRET_KEY", "")
 UPBIT_BASE_URL = "https://api.upbit.com"
 
+# GitHub Models API (gpt-4o-mini via GitHub)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
+GITHUB_MODEL = "openai/gpt-4o-mini"
+
 # ─── 토큰 관리 ────────────────────────────────────────────────
 _kis_token = {"access_token": "", "expires_at": 0}
 
@@ -61,8 +66,8 @@ app.add_middleware(
 
 @app.get("/")
 async def serve_html():
-    """stock-advisor.html 서빙"""
-    html_path = pathlib.Path(__file__).parent / "stock-advisor.html"
+    """index.html 서빙"""
+    html_path = pathlib.Path(__file__).parent / "index.html"
     return FileResponse(html_path, media_type="text/html")
 
 
@@ -599,8 +604,144 @@ async def health_check():
         "status": "ok",
         "kisConfigured": bool(KIS_APP_KEY),
         "upbitConfigured": bool(UPBIT_ACCESS_KEY),
+        "githubModelsConfigured": bool(GITHUB_TOKEN),
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ─── LLM 종목분석/리밸런싱 ─────────────────────────────────────
+import json as _json
+
+
+class AnalyzeRequest(BaseModel):
+    holdings: list
+    isa: Optional[dict] = None
+    cash: Optional[dict] = None
+    usdKrw: float = 1450
+    totalAsset: float = 0
+
+
+ANALYZE_SYSTEM_PROMPT = """당신은 한국 개인투자자를 위한 포트폴리오 어드바이저입니다.
+제공된 포트폴리오(한국/미국 주식, 암호화폐, ISA ETF, 현금)를 분석하여
+1) 보유 종목별 매매 의사결정과 근거
+2) 포트폴리오 전체 관점의 리밸런싱 권고
+를 JSON으로만 응답하세요. 마크다운 불허. 순수 JSON만.
+
+출력 스키마:
+{
+  "marketOverview": "현재 시장 전반에 대한 2-3문장 요약 (한국어)",
+  "analyses": [
+    {
+      "code": "종목코드",
+      "name": "종목명",
+      "action": "적극매수|매수|분할매수|보유유지|비중축소|부분매도|매도권장|손절매도",
+      "color": "green|blue|gray|yellow|red",
+      "score": 0-100 정수,
+      "fundamentalScore": 0-100 정수,
+      "technicalScore": 0-100 정수,
+      "reasons": ["근거1", "근거2", "근거3"]
+    }
+  ],
+  "rebalancing": {
+    "summary": "포트폴리오 전체 평가 2-3문장",
+    "targetAllocation": {"국내주식": 30, "미국주식": 40, "암호화폐": 10, "ETF": 15, "현금": 5},
+    "actions": [
+      {"priority": "high|medium|low", "type": "매수|매도|비중조정|현금확보", "target": "대상 종목/섹터", "description": "구체적 실행 방안"}
+    ]
+  }
+}
+
+반드시 현재 시장 상황(2026년 4월 기준)과 각 종목의 최신 추세를 반영하세요.
+매번 새로운 분석을 제공하세요 — 기계적 반복 금지."""
+
+
+@app.post("/api/analyze")
+async def analyze_portfolio(req: AnalyzeRequest):
+    """포트폴리오를 LLM으로 분석하여 종목별 매매의견과 리밸런싱 권고 반환"""
+    if not GITHUB_TOKEN:
+        raise HTTPException(status_code=500, detail="GITHUB_TOKEN 환경변수 미설정")
+
+    # LLM에 전달할 포트폴리오 요약 구성
+    portfolio_data = {
+        "총자산_원": int(req.totalAsset),
+        "환율_USD_KRW": req.usdKrw,
+        "현금": req.cash or {},
+        "보유종목": [
+            {
+                "code": h.get("code"),
+                "name": h.get("name"),
+                "market": h.get("market"),
+                "sector": h.get("sector"),
+                "qty": h.get("qty"),
+                "avgPrice": h.get("avg"),
+                "currentPrice": h.get("price"),
+                "returnPct": round(((h.get("price", 0) - h.get("avg", 0)) / h.get("avg", 1)) * 100, 2) if h.get("avg") else 0,
+                "per": h.get("per"),
+                "pbr": h.get("pbr"),
+                "roe": h.get("roe"),
+                "rsi": h.get("rsi"),
+                "macd": h.get("macd"),
+                "note": h.get("note"),
+            }
+            for h in (req.holdings or [])
+        ],
+        "ISA_ETF": [
+            {
+                "code": h.get("code"),
+                "name": h.get("name"),
+                "qty": h.get("qty"),
+                "avgPrice": h.get("avg"),
+                "currentPrice": h.get("price"),
+                "returnPct": h.get("ret"),
+                "sector": h.get("sector"),
+            }
+            for h in ((req.isa or {}).get("holdings") or [])
+        ],
+    }
+
+    user_content = (
+        f"현재 날짜: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+        f"포트폴리오 데이터(JSON):\n{_json.dumps(portfolio_data, ensure_ascii=False, indent=2)}\n\n"
+        "위 포트폴리오를 분석하여 스키마에 맞는 순수 JSON만 반환하세요."
+    )
+
+    payload = {
+        "model": GITHUB_MODEL,
+        "messages": [
+            {"role": "system", "content": ANALYZE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.7,
+        "max_tokens": 4000,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                GITHUB_MODELS_URL,
+                headers={
+                    "Authorization": f"Bearer {GITHUB_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+            parsed = _json.loads(content)
+            return {
+                "status": "ok",
+                "model": GITHUB_MODEL,
+                "timestamp": datetime.now().isoformat(),
+                "result": parsed,
+            }
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"LLM API 오류: {e.response.status_code} {e.response.text[:300]}")
+    except _json.JSONDecodeError as e:
+        raise HTTPException(status_code=502, detail=f"LLM 응답 파싱 실패: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"분석 실패: {str(e)}")
 
 
 # ─── 서버 실행 ─────────────────────────────────────────────────
