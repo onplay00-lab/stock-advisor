@@ -155,14 +155,11 @@ class handler(BaseHTTPRequestHandler):
                     return json.loads(resp.read().decode("utf-8")), None
             except urllib.error.HTTPError as e:
                 body = e.read().decode("utf-8", errors="ignore")[:400]
-                # 디버그 정보 (키 자체는 노출 X, 길이/접두사만)
-                key_len = len(api_key)
-                key_prefix = api_key[:12] if api_key else "(empty)"
                 if e.code == 401:
                     return None, {
                         "status": 401,
-                        "msg": f"Anthropic 401: body={body!r} keylen={key_len} prefix={key_prefix}",
-                        "hint": "Vercel 환경변수 ANTHROPIC_API_KEY를 확인하세요.",
+                        "msg": "Anthropic API 키 인증 실패 (401)",
+                        "hint": "Vercel 환경변수 ANTHROPIC_API_KEY를 확인하세요 (https://console.anthropic.com/settings/keys).",
                     }
                 if e.code == 400:
                     return None, {"status": 400, "msg": f"요청 형식 오류 (400): {body}"}
