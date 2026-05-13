@@ -176,7 +176,8 @@ let DEFAULT_USD_KRW = 1509;
 const toKRW = (price, market, usdKrw) => (market === "US" ? parseFloat(price) * (usdKrw || DEFAULT_USD_KRW) : parseFloat(price));
 
 // ─── 실제 포트폴리오 데이터 (2026-03-30 기준) ─────────────────
-const MY_CASH = { hantoo: 765982, upbit: 277279 }; // ETH 25만원 추가매수 후
+const MY_CASH = { hantoo: 765482, upbit: 277279 }; // 한투 원화예수금
+const MY_USD_CASH = 417.33; // 한투 외화예수금 (USD). 환율 변동 시 자동 환산됨.
 const ORIGINAL_INVESTMENT = 10000000; // 원금: 한투 300 + 업비트 200 + ISA 500 = 1,000만원
 
 // 가격은 페이지 로드 시 자체 시세 API(/api/price)로 자동 갱신됨.
@@ -285,7 +286,10 @@ function StockAdvisor() {
   const [tab, setTab] = useState("dashboard");
   const [holdings, setHoldings] = useState(MY_HOLDINGS);
   const [isaData, setIsaData] = useState(ISA);
-  const [cashData, setCashData] = useState(MY_CASH);
+  const [cashData, setCashData] = useState({
+    hantoo: MY_CASH.hantoo + Math.round(MY_USD_CASH * DEFAULT_USD_KRW),
+    upbit: MY_CASH.upbit,
+  });
   const [usdKrw, setUsdKrw] = useState(DEFAULT_USD_KRW);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -402,13 +406,15 @@ function StockAdvisor() {
       setIsaData(mappedIsa);
 
       // 현금 잔액 업데이트 (서버에서 가져오기)
-      // 한투 = 원화예수금 + 외화예수금(USD → KRW 환산). 한투 앱 "주문가능원화"와 일치.
+      // 한투 = 원화예수금 + USD예수금(환율 환산). USD는 API가 0이면 MY_USD_CASH 폴백.
       const newCash = { ...MY_CASH };
       if (serverData.domestic && serverData.domestic.summary) {
-        const krwCash = serverData.domestic.summary.availableCash || 0;
-        const usdCash = (serverData.overseas && serverData.overseas.summary && serverData.overseas.summary.usdCash) || 0;
+        const krwCash = serverData.domestic.summary.availableCash || MY_CASH.hantoo;
+        const apiUsd = (serverData.overseas && serverData.overseas.summary && serverData.overseas.summary.usdCash) || 0;
+        const usdCash = apiUsd > 0 ? apiUsd : MY_USD_CASH;
         newCash.hantoo = krwCash + Math.round(usdCash * usdKrw);
-        if (!newCash.hantoo) newCash.hantoo = MY_CASH.hantoo;
+      } else {
+        newCash.hantoo = MY_CASH.hantoo + Math.round(MY_USD_CASH * usdKrw);
       }
       if (serverData.crypto && serverData.crypto.summary) {
         newCash.upbit = serverData.crypto.summary.krwBalance || MY_CASH.upbit;
@@ -423,6 +429,13 @@ function StockAdvisor() {
       // 환율 업데이트
       const rate = await fetchExchangeRate();
       if (rate) { setUsdKrw(rate); DEFAULT_USD_KRW = rate; }
+
+      // 현금 잔액 (서버 미연결: 폴백값 + USD 환산)
+      const fxForCash = rate || usdKrw;
+      setCashData({
+        hantoo: MY_CASH.hantoo + Math.round(MY_USD_CASH * fxForCash),
+        upbit: MY_CASH.upbit,
+      });
 
       // 일반 계좌 주식 업데이트
       const newHoldings = [...MY_HOLDINGS];
