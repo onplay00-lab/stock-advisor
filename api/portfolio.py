@@ -119,14 +119,6 @@ def fetch_overseas_balance(cano: str) -> dict:
             data = _kis_get("/uapi/overseas-stock/v1/trading/inquire-balance", "TTTS3012R", params)
         except Exception:
             continue
-        # USD 외화예수금 (output2). 거래소별로 동일 값 반환되므로 최대값 사용.
-        out2 = data.get("output2") or {}
-        if isinstance(out2, list):
-            out2 = out2[0] if out2 else {}
-        for f in ("frcr_use_psbl_amt", "frcr_dncl_amt"):
-            v = float(out2.get(f, 0) or 0)
-            if v > usd_cash:
-                usd_cash = v
         for item in data.get("output1", []) or []:
             qty = float(item.get("ovrs_cblc_qty", 0) or 0)
             if qty <= 0:
@@ -151,6 +143,19 @@ def fetch_overseas_balance(cano: str) -> dict:
                 "returnPct": float(item.get("evlu_pfls_rt", 0) or 0),
                 "currency": "USD",
             })
+    # 외화 예수금: 해외주식 매수가능금액 조회 API 사용 (TTTS3007R)
+    try:
+        ps_params = {
+            "CANO": cano, "ACNT_PRDT_CD": _env("KIS_ACNT_PRDT_CD", "01"),
+            "OVRS_EXCG_CD": "NASD", "OVRS_ORD_UNPR": "0",
+            "ITEM_CD": "AAPL", "TR_CRCY_CD": "USD",
+        }
+        ps = _kis_get("/uapi/overseas-stock/v1/trading/inquire-psamount", "TTTS3007R", ps_params)
+        out = ps.get("output") or {}
+        usd_cash = float(out.get("ord_psbl_frcr_amt", 0) or out.get("frcr_dncl_amt1", 0) or 0)
+    except Exception:
+        pass
+
     return {"holdings": all_h, "summary": {"usdCash": usd_cash}}
 
 
