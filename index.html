@@ -402,9 +402,13 @@ function StockAdvisor() {
       setIsaData(mappedIsa);
 
       // 현금 잔액 업데이트 (서버에서 가져오기)
+      // 한투 = 원화예수금 + 외화예수금(USD → KRW 환산). 한투 앱 "주문가능원화"와 일치.
       const newCash = { ...MY_CASH };
       if (serverData.domestic && serverData.domestic.summary) {
-        newCash.hantoo = serverData.domestic.summary.availableCash || MY_CASH.hantoo;
+        const krwCash = serverData.domestic.summary.availableCash || 0;
+        const usdCash = (serverData.overseas && serverData.overseas.summary && serverData.overseas.summary.usdCash) || 0;
+        newCash.hantoo = krwCash + Math.round(usdCash * usdKrw);
+        if (!newCash.hantoo) newCash.hantoo = MY_CASH.hantoo;
       }
       if (serverData.crypto && serverData.crypto.summary) {
         newCash.upbit = serverData.crypto.summary.krwBalance || MY_CASH.upbit;

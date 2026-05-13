@@ -108,6 +108,7 @@ def fetch_domestic_balance(cano: str) -> dict:
 def fetch_overseas_balance(cano: str) -> dict:
     all_h = []
     seen_codes = set()
+    usd_cash = 0.0
     for exchange in ("NASD", "NYSE", "AMEX"):
         params = {
             "CANO": cano, "ACNT_PRDT_CD": _env("KIS_ACNT_PRDT_CD", "01"),
@@ -118,6 +119,14 @@ def fetch_overseas_balance(cano: str) -> dict:
             data = _kis_get("/uapi/overseas-stock/v1/trading/inquire-balance", "TTTS3012R", params)
         except Exception:
             continue
+        # USD 외화예수금 (output2). 거래소별로 동일 값 반환되므로 최대값 사용.
+        out2 = data.get("output2") or {}
+        if isinstance(out2, list):
+            out2 = out2[0] if out2 else {}
+        for f in ("frcr_use_psbl_amt", "frcr_dncl_amt"):
+            v = float(out2.get(f, 0) or 0)
+            if v > usd_cash:
+                usd_cash = v
         for item in data.get("output1", []) or []:
             qty = float(item.get("ovrs_cblc_qty", 0) or 0)
             if qty <= 0:
@@ -142,7 +151,7 @@ def fetch_overseas_balance(cano: str) -> dict:
                 "returnPct": float(item.get("evlu_pfls_rt", 0) or 0),
                 "currency": "USD",
             })
-    return {"holdings": all_h, "summary": {}}
+    return {"holdings": all_h, "summary": {"usdCash": usd_cash}}
 
 
 def boost_overseas_prices(holdings: list):
