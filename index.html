@@ -525,10 +525,12 @@ function StockAdvisor() {
       setAiTimestamp(new Date(result.timestamp || Date.now()));
       setAiStatus(`✅ 분석 완료 · ${result.model || ""}`);
     } else {
-      setAiStatus(`❌ 분석 실패: ${result?.error || "알 수 없는 오류"}`);
+      const msg = result?.error || "알 수 없는 오류";
+      const hint = result?.hint ? ` · ${result.hint}` : "";
+      setAiStatus(`❌ 분석 실패: ${msg}${hint}`);
     }
     setAiLoading(false);
-    setTimeout(() => setAiStatus(""), 8000);
+    setTimeout(() => setAiStatus(""), 15000);
   }, [holdings, isaData, cashData, usdKrw, refreshPrices]);
 
   // 페이지 로드 시 자동 업데이트 + 뉴스 로딩

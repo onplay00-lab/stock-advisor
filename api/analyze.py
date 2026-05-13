@@ -2,10 +2,12 @@
 GitHub Models(gpt-4o-mini)로 포트폴리오 분석 + 리밸런싱 권고를 JSON으로 반환.
 
 환경변수 (Vercel Dashboard → Project → Settings → Environment Variables):
-  GITHUB_TOKEN  : GitHub Personal Access Token (models 권한 포함)
+  GITHUB_TOKEN  : GitHub PAT (fine-grained, "Models" 권한 포함 필수)
 """
 import json
 import os
+import socket
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 import urllib.request
@@ -14,6 +16,8 @@ import urllib.error
 
 GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions"
 GITHUB_MODEL = "openai/gpt-4o-mini"
+REQUEST_TIMEOUT = 45  # seconds
+MAX_RETRIES = 2  # 5xx/네트워크 오류시 재시도 횟수
 
 
 SYSTEM_PROMPT = """당신은 한국 개인투자자를 위한 포트폴리오 어드바이저입니다.
@@ -92,28 +96,68 @@ class handler(BaseHTTPRequestHandler):
                 "response_format": {"type": "json_object"},
             }).encode("utf-8")
 
-            gh_req = urllib.request.Request(
-                GITHUB_MODELS_URL,
-                data=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
+            result, err = self._call_with_retry(payload, token)
+            if err:
+                self._send(err["status"], {"status": "error", "error": err["msg"], "hint": err.get("hint")})
+                return
 
-            with urllib.request.urlopen(gh_req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                content = data["choices"][0]["message"]["content"]
+            try:
+                content = result["choices"][0]["message"]["content"]
                 parsed = json.loads(content)
-                self._send(200, {
-                    "status": "ok",
-                    "model": GITHUB_MODEL,
-                    "timestamp": datetime.now().isoformat(),
-                    "result": parsed,
-                })
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="ignore")[:300]
-            self._send(502, {"status": "error", "error": f"HTTP {e.code}: {err_body}"})
+            except (KeyError, json.JSONDecodeError, IndexError) as e:
+                self._send(502, {"status": "error", "error": f"AI 응답 파싱 실패: {e}", "hint": "다시 시도해주세요."})
+                return
+
+            self._send(200, {
+                "status": "ok",
+                "model": GITHUB_MODEL,
+                "timestamp": datetime.now().isoformat(),
+                "result": parsed,
+            })
+        except json.JSONDecodeError as e:
+            self._send(400, {"status": "error", "error": f"잘못된 요청 형식: {e}"})
         except Exception as e:
-            self._send(500, {"status": "error", "error": str(e)})
+            self._send(500, {"status": "error", "error": f"내부 오류: {e}"})
+
+    def _call_with_retry(self, payload: bytes, token: str):
+        """GitHub Models 호출. 401/400은 즉시 실패, 5xx/네트워크는 재시도."""
+        last_err = None
+        for attempt in range(MAX_RETRIES + 1):
+            gh_req = urllib.request.Request(
+                GITHUB_MODELS_URL, data=payload, method="POST",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(gh_req, timeout=REQUEST_TIMEOUT) as resp:
+                    return json.loads(resp.read().decode("utf-8")), None
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="ignore")[:300]
+                if e.code == 401:
+                    return None, {
+                        "status": 401,
+                        "msg": "GitHub 토큰 인증 실패 (401)",
+                        "hint": "Vercel 환경변수 GITHUB_TOKEN을 'Models' 권한이 있는 fine-grained PAT으로 재발급하세요. https://github.com/settings/personal-access-tokens",
+                    }
+                if e.code == 403:
+                    return None, {"status": 403, "msg": f"권한 거부 (403): {body}", "hint": "토큰의 Models 권한을 확인하세요."}
+                if e.code == 429:
+                    last_err = {"status": 429, "msg": "Rate limit (429). 잠시 후 재시도하세요."}
+                    if attempt < MAX_RETRIES:
+                        time.sleep(2 * (attempt + 1))
+                        continue
+                if 500 <= e.code < 600:
+                    last_err = {"status": 502, "msg": f"GitHub 일시 오류 ({e.code})", "hint": "잠시 후 다시 시도"}
+                    if attempt < MAX_RETRIES:
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                return None, {"status": 502, "msg": f"HTTP {e.code}: {body}"}
+            except (socket.timeout, TimeoutError):
+                last_err = {"status": 504, "msg": "AI 응답 타임아웃", "hint": "다시 시도해주세요."}
+                if attempt < MAX_RETRIES:
+                    continue
+            except urllib.error.URLError as e:
+                last_err = {"status": 502, "msg": f"네트워크 오류: {e.reason}"}
+                if attempt < MAX_RETRIES:
+                    time.sleep(1)
+                    continue
+        return None, last_err or {"status": 500, "msg": "원인 미상"}
