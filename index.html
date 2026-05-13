@@ -506,7 +506,7 @@ function StockAdvisor() {
     setAiLoading(true);
     setAiStatus("🔄 최신 시세 가져오는 중...");
     await refreshPrices();
-    setAiStatus("🤖 GPT-4o-mini 분석 중... (최대 60초)");
+    setAiStatus("🤖 Claude Opus 4.7 분석 중... (최대 90초)");
     // 최신 state가 반영되도록 다음 tick에서 실행
     await new Promise(r => setTimeout(r, 100));
     const totalAssetCalc = (holdings.reduce((s, h) => s + (h.qty * toKRW(h.price, h.market, usdKrw)), 0))
@@ -753,7 +753,7 @@ function StockAdvisor() {
                 <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">룰 기반 · AI 분석 새로고침 눌러주세요</span>
               )}
             </div>
-            <p className="text-xs text-gray-400 mb-0">{aiAnalysis ? "GPT-4o-mini 실시간 분석 결과" : "기본적 35% + 기술적 45% + 포트폴리오 20% (공격형 가중치)"}</p>
+            <p className="text-xs text-gray-400 mb-0">{aiAnalysis ? "Claude Opus 4.7 실시간 분석 결과" : "기본적 35% + 기술적 45% + 포트폴리오 20% (공격형 가중치)"}</p>
             {aiAnalysis?.marketOverview && (
               <div className="mt-3 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2 text-xs text-indigo-800">
                 🌐 <b>시장 개요:</b> {aiAnalysis.marketOverview}
