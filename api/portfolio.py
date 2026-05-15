@@ -219,12 +219,19 @@ def fetch_upbit_balance():
     headers = _upbit_auth_header()
     if not headers:
         return None
+    # 키가 설정된 상태에서 발생한 실패는 silent 처리하지 않고 호출자(build_portfolio)
+    # try/except가 잡아서 errors에 기록하도록 그대로 전파. HTTPError는 status + body 메시지 보존.
     try:
         data = _http("GET", f"{UPBIT_BASE_URL}/v1/accounts", headers=headers)
-    except Exception:
-        return None
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="ignore")[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"HTTP {e.code} {e.reason} body={body}")
     if not isinstance(data, list):
-        return None
+        raise RuntimeError(f"업비트 응답이 list가 아님: {type(data).__name__}")
 
     holdings = []
     krw_balance = 0.0
