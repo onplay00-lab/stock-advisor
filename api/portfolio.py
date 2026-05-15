@@ -81,6 +81,9 @@ def fetch_domestic_balance(cano: str) -> dict:
         "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
     }
     data = _kis_get("/uapi/domestic-stock/v1/trading/inquire-balance", "TTTC8434R", params)
+    # KIS는 HTTP 200이라도 rt_cd != "0"이면 논리적 실패. 진단을 위해 보존.
+    rt_cd = str(data.get("rt_cd", ""))
+    msg1 = (data.get("msg1") or "").strip()
     holdings = []
     for item in data.get("output1", []) or []:
         qty = int(float(item.get("hldg_qty", 0) or 0))
@@ -109,6 +112,7 @@ def fetch_domestic_balance(cano: str) -> dict:
             "availableCash": float(summary.get("dnca_tot_amt", 0) or 0),
             "totalAsset": float(summary.get("scts_evlu_amt", 0) or 0) + float(summary.get("dnca_tot_amt", 0) or 0),
         },
+        "_kis": {"rt_cd": rt_cd, "msg1": msg1, "output1_len": len(data.get("output1") or [])},
     }
 
 
@@ -317,6 +321,17 @@ def build_portfolio() -> dict:
     if isa_cano:
         try:
             results["isa"] = fetch_domestic_balance(isa_cano)
+            # ISA 잔고가 비어 있으면 KIS rt_cd/msg1을 errors에 노출해 진단 가능하게 함.
+            isa_data = results["isa"]
+            if isa_data and not isa_data["holdings"]:
+                k = isa_data.get("_kis") or {}
+                if k.get("rt_cd") not in ("", "0"):
+                    results["errors"].append(f"ISA KIS 응답: rt_cd={k.get('rt_cd')} msg={k.get('msg1') or '-'}")
+                else:
+                    results["errors"].append(
+                        f"ISA 잔고 빈 응답 (rt_cd=0, output1_len={k.get('output1_len', 0)}). "
+                        "KIS_ISA_CANO 또는 KIS_ACNT_PRDT_CD 확인 필요."
+                    )
         except Exception as e:
             results["errors"].append(f"ISA 조회 실패: {e}")
     else:
