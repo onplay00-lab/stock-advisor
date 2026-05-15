@@ -393,14 +393,17 @@ function StockAdvisor() {
         ...getAnalysisDefaults(h.code.replace("KRW-", "")),
       }));
 
-      // 서버에서 못 가져온 종목은 하드코딩 데이터 유지
-      const allServerCodes = new Set([
-        ...mappedDomestic.map(h => h.code),
-        ...mappedOverseas.map(h => h.code),
-        ...mappedCrypto.map(h => h.code),
-      ]);
+      // 서버가 정상 조회한 시장(domestic/overseas/crypto)은 서버 응답이 정답이다.
+      // 매도해서 서버 응답에서 빠진 종목을 MY_HOLDINGS로 되살리지 않도록, 해당 시장 종목은 폴백에서 제외.
+      // 서버가 아예 조회하지 않은 시장(예: crypto 미구현 → null)만 하드코딩 데이터로 보존한다.
       const isaCodeSet = new Set(mappedIsa.holdings.map(h => h.code));
-      const remainingHoldings = MY_HOLDINGS.filter(h => !allServerCodes.has(h.code) && !isaCodeSet.has(h.code));
+      const remainingHoldings = MY_HOLDINGS.filter(h => {
+        if (isaCodeSet.has(h.code)) return false;
+        if (h.market === "KRX" && serverData.domestic) return false;
+        if (h.market === "US" && serverData.overseas) return false;
+        if (h.market === "CRYPTO" && serverData.crypto) return false;
+        return true;
+      });
 
       setHoldings([...mappedDomestic, ...mappedOverseas, ...mappedCrypto, ...remainingHoldings]);
       setIsaData(mappedIsa);
