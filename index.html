@@ -175,15 +175,15 @@ const YAHOO_MAP = {
 let DEFAULT_USD_KRW = 1509;
 const toKRW = (price, market, usdKrw) => (market === "US" ? parseFloat(price) * (usdKrw || DEFAULT_USD_KRW) : parseFloat(price));
 
-// ─── 실제 포트폴리오 데이터 (2026-03-30 기준) ─────────────────
-const MY_CASH = { hantoo: 765482, upbit: 278639 }; // 한투/업비트 원화예수금
+// ─── 실제 포트폴리오 데이터 (2026-05-15 기준) ─────────────────
+// SK하이닉스 1주 매도 완료 → 매도대금 약 1,976,000원이 한투 예수금에 가산됨.
+const MY_CASH = { hantoo: 2741482, upbit: 278639 }; // 한투/업비트 원화예수금
 const MY_USD_CASH = 417.33; // 한투 외화예수금 (USD). 환율 변동 시 자동 환산됨.
 const ORIGINAL_INVESTMENT = 10000000; // 원금: 한투 300 + 업비트 200 + ISA 500 = 1,000만원
 
 // 가격은 페이지 로드 시 자체 시세 API(/api/price)로 자동 갱신됨.
-// 하드코딩 값은 폴백용 (2026-05-13 기준 네이버/야후/업비트 시세).
+// 하드코딩 값은 서버 미연결 시 폴백용 (2026-05-15 기준).
 const MY_HOLDINGS = [
-  { name: "SK하이닉스", code: "000660", market: "KRX", sector: "반도체", qty: 1, avg: 919000, price: 1976000, per: 2.8, pbr: 2.5, roe: 72.4, rsi: 42, macd: "bearish", note: "HBM4 엔비디아 공급 70% 확보" },
   { name: "리노공업", code: "058470", market: "KRX", sector: "반도체 부품", qty: 4, avg: 98700, price: 112300, per: 24.9, pbr: 4.7, roe: 20.1, rsi: 51.5, macd: "neutral", note: "AI ASIC 테스트소켓 수혜" },
   { name: "Vertiv Holdings", code: "VRT", market: "US", sector: "데이터센터 인프라", qty: 2, avg: 244.88, price: 367.13, per: 78.1, pbr: 15, roe: 41.8, rsi: 62, macd: "bullish", note: "사상최고가 $282 후 조정중, 애널리스트 Strong Buy 컨센서스 목표가 $271" },
   { name: "이더리움 (ETH)", code: "ETH", market: "CRYPTO", sector: "암호화폐", qty: 0.5932, avg: 2903399, price: 3419000, per: 0, pbr: 0, roe: 0, rsi: 25, macd: "bearish", note: "트리플 과매도, 공포지수 14 — 25만원 분할매수 1차 완료" },
@@ -687,6 +687,20 @@ function StockAdvisor() {
                   </div>
                 </div>
               ))}
+              <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <Badge c="gray">💵 예수금</Badge>
+                  <span className="text-sm text-gray-600">한투 원화·외화 환산</span>
+                </div>
+                <p className="text-sm font-bold text-indigo-700">{fmtFull(cashData.hantoo)}원</p>
+              </div>
+              <div className="flex items-center justify-between bg-gray-50 rounded-lg p-3">
+                <div className="flex items-center gap-2">
+                  <Badge c="gray">💵 예수금</Badge>
+                  <span className="text-sm text-gray-600">업비트 KRW</span>
+                </div>
+                <p className="text-sm font-bold text-indigo-700">{fmtFull(cashData.upbit)}원</p>
+              </div>
             </div>
           </div>
 
