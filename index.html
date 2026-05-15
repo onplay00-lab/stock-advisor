@@ -359,7 +359,8 @@ function StockAdvisor() {
           };
         });
         if (serverData.isa.summary) {
-          mappedIsa.cash = serverData.isa.summary.availableCash || ISA.cash;
+          // ??로 0원도 정상 반영 (||는 0을 falsy로 보고 하드코딩 폴백시켜 버그 발생)
+          mappedIsa.cash = serverData.isa.summary.availableCash ?? ISA.cash;
         }
       }
 
@@ -413,7 +414,7 @@ function StockAdvisor() {
       // 한투 = 원화예수금 + USD예수금(환율 환산). USD는 API가 0이면 MY_USD_CASH 폴백.
       const newCash = { ...MY_CASH };
       if (serverData.domestic && serverData.domestic.summary) {
-        const krwCash = serverData.domestic.summary.availableCash || MY_CASH.hantoo;
+        const krwCash = serverData.domestic.summary.availableCash ?? MY_CASH.hantoo;
         const apiUsd = (serverData.overseas && serverData.overseas.summary && serverData.overseas.summary.usdCash) || 0;
         const usdCash = apiUsd > 0 ? apiUsd : MY_USD_CASH;
         newCash.hantoo = krwCash + Math.round(usdCash * usdKrw);
@@ -421,7 +422,7 @@ function StockAdvisor() {
         newCash.hantoo = MY_CASH.hantoo + Math.round(MY_USD_CASH * usdKrw);
       }
       if (serverData.crypto && serverData.crypto.summary) {
-        newCash.upbit = serverData.crypto.summary.krwBalance || MY_CASH.upbit;
+        newCash.upbit = serverData.crypto.summary.krwBalance ?? MY_CASH.upbit;
       }
       setCashData(newCash);
 
