@@ -1,9 +1,14 @@
 """Vercel Serverless Function — /api/portfolio
-한국투자증권 OpenAPI로 국내/ISA/해외 잔고 통합 조회.
-환경변수: KIS_APP_KEY, KIS_APP_SECRET, KIS_CANO, KIS_ACNT_PRDT_CD, KIS_ISA_CANO
+한국투자증권 OpenAPI로 국내/ISA/해외 잔고 + 업비트로 코인 잔고 통합 조회.
+환경변수:
+  KIS_APP_KEY, KIS_APP_SECRET, KIS_CANO, KIS_ACNT_PRDT_CD, KIS_ISA_CANO (한투)
+  UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY (업비트, 둘 다 있을 때만 코인 조회 활성)
 
 응답 형태는 server.py의 /api/portfolio와 동일하므로 index.html 매핑 그대로 동작.
 """
+import base64
+import hashlib
+import hmac
 import json
 import os
 import ssl
@@ -11,10 +16,12 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler
 
 
 KIS_BASE_URL = "https://openapi.koreainvestment.com:9443"
+UPBIT_BASE_URL = "https://api.upbit.com"
 TIMEOUT = 8
 UA = "Mozilla/5.0"
 
@@ -176,6 +183,94 @@ def boost_overseas_prices(holdings: list):
             pass
 
 
+# ─── Upbit (stdlib JWT HS256, 외부 의존성 없음) ────────────────────
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _jwt_hs256(payload: dict, secret: str) -> str:
+    header = {"typ": "JWT", "alg": "HS256"}
+    header_b64 = _b64url(json.dumps(header, separators=(",", ":")).encode())
+    payload_b64 = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    signing_input = f"{header_b64}.{payload_b64}".encode()
+    sig = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url(sig)}"
+
+
+def _upbit_auth_header():
+    access = _env("UPBIT_ACCESS_KEY")
+    secret = _env("UPBIT_SECRET_KEY")
+    if not access or not secret:
+        return None
+    payload = {
+        "access_key": access,
+        "nonce": str(uuid.uuid4()),
+        "timestamp": int(time.time() * 1000),
+    }
+    return {"Authorization": f"Bearer {_jwt_hs256(payload, secret)}"}
+
+
+def fetch_upbit_balance():
+    """업비트 잔고 조회. 키가 둘 다 없으면 None 반환 (프론트가 폴백 처리)."""
+    headers = _upbit_auth_header()
+    if not headers:
+        return None
+    try:
+        data = _http("GET", f"{UPBIT_BASE_URL}/v1/accounts", headers=headers)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+
+    holdings = []
+    krw_balance = 0.0
+    for item in data:
+        currency = item.get("currency", "")
+        balance = float(item.get("balance", 0) or 0)
+        avg = float(item.get("avg_buy_price", 0) or 0)
+        if currency == "KRW":
+            krw_balance = balance
+            continue
+        if balance <= 0:
+            continue
+        holdings.append({
+            "name": currency,
+            "code": f"KRW-{currency}",
+            "market": "CRYPTO",
+            "quantity": balance,
+            "avgPrice": avg,
+            "currency": "KRW",
+        })
+
+    if holdings:
+        try:
+            codes = ",".join(h["code"] for h in holdings)
+            qs = urllib.parse.urlencode({"markets": codes})
+            tickers = _http("GET", f"{UPBIT_BASE_URL}/v1/ticker?{qs}")
+            tmap = {t.get("market"): t for t in (tickers or [])}
+            for h in holdings:
+                t = tmap.get(h["code"], {})
+                cur = float(t.get("trade_price", 0) or 0)
+                h["currentPrice"] = cur
+                h["evalAmount"] = h["quantity"] * cur
+                h["evalPnl"] = h["evalAmount"] - (h["quantity"] * h["avgPrice"])
+                h["returnPct"] = ((cur - h["avgPrice"]) / h["avgPrice"] * 100) if h["avgPrice"] > 0 else 0
+        except Exception:
+            pass
+
+    total_eval = sum(h.get("evalAmount", 0) for h in holdings)
+    total_pnl = sum(h.get("evalPnl", 0) for h in holdings)
+    return {
+        "holdings": holdings,
+        "summary": {
+            "krwBalance": krw_balance,
+            "totalEvalAmount": total_eval,
+            "totalPnl": total_pnl,
+            "totalAsset": krw_balance + total_eval,
+        },
+    }
+
+
 def fetch_fx() -> dict:
     try:
         data = _http("GET", "https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD")
@@ -227,6 +322,14 @@ def build_portfolio() -> dict:
     else:
         results["errors"].append("KIS_ISA_CANO 미설정")
 
+    # 업비트 (키 미설정 시 fetch_upbit_balance가 None 반환 → 프론트가 폴백)
+    try:
+        results["crypto"] = fetch_upbit_balance()
+        if results["crypto"] is None and (not _env("UPBIT_ACCESS_KEY") or not _env("UPBIT_SECRET_KEY")):
+            results["errors"].append("업비트 키 미설정 (UPBIT_ACCESS_KEY/UPBIT_SECRET_KEY)")
+    except Exception as e:
+        results["errors"].append(f"업비트 조회 실패: {e}")
+
     # 통합 자산
     total_asset = 0.0
     total_invested = 0.0
@@ -249,6 +352,12 @@ def build_portfolio() -> dict:
             total_asset += eval_krw
             total_invested += cost_krw
             h["evalAmountKRW"] = eval_krw
+    if results["crypto"]:
+        s = results["crypto"]["summary"]
+        total_asset += s.get("krwBalance", 0)
+        for h in results["crypto"]["holdings"]:
+            total_asset += h.get("evalAmount", 0)
+            total_invested += h.get("quantity", 0) * h.get("avgPrice", 0)
 
     total_pnl = total_asset - total_invested
     ret_pct = (total_pnl / total_invested * 100) if total_invested > 0 else 0
