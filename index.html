@@ -340,8 +340,10 @@ function StockAdvisor() {
       }));
 
       // ISA 매핑 (서버 데이터 + 분석 파라미터)
+      // 서버가 ISA 계좌를 정상 조회했다면 빈 배열이라도 그것이 정답 (전량 매도 반영).
+      // 서버 자체가 실패했을 때(serverData.isa === null)만 하드코딩 폴백 유지.
       let mappedIsa = { ...ISA, holdings: [...ISA.holdings] };
-      if (serverData.isa && serverData.isa.holdings && serverData.isa.holdings.length > 0) {
+      if (serverData.isa && serverData.isa.holdings) {
         mappedIsa.holdings = serverData.isa.holdings.map(h => {
           const defaultData = ISA.holdings.find(ih => ih.code === h.code);
           return {
@@ -360,7 +362,6 @@ function StockAdvisor() {
           mappedIsa.cash = serverData.isa.summary.availableCash || ISA.cash;
         }
       }
-      // ISA 서버 데이터가 비어있으면 기존 하드코딩 데이터 유지
 
       // 해외 주식 매핑 (서버 데이터 + 분석 파라미터, 거래소별 중복 제거)
       const overseasRaw = (serverData.overseas && serverData.overseas.holdings || []);
